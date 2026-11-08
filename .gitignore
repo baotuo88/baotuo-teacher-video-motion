@@ -1,0 +1,20 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.data/
+node_modules/
+dist/
+
+# Never publish local configuration, credentials or backups
+.env.*
+!.env.example
+*.pem
+*.key
+*.sqlite3
+*.sqlite3-*
+*.db
+backups/
+
+.DS_Store

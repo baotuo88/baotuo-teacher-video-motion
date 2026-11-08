@@ -1,0 +1,45 @@
+# Deploy a prebuilt GHCR image; no source checkout or local build required.
+services:
+  console:
+    image: ${IMAGE:?Set IMAGE to the published GHCR tag or digest}
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set a strong ADMIN_PASSWORD in .env}
+      PROVIDER_ENCRYPTION_KEY: ${PROVIDER_ENCRYPTION_KEY:-}
+      DATA_ROOT: /data
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+    volumes:
+      - runtime-data:/data
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  worker:
+    image: ${IMAGE:?Set IMAGE to the published GHCR tag or digest}
+    command: [python, -m, app.worker]
+    environment:
+      DATA_ROOT: /data
+      RUNTIME_ROOT: /data/runtimes
+      PROVIDER_ENCRYPTION_KEY: ${PROVIDER_ENCRYPTION_KEY:-}
+    volumes:
+      - runtime-data:/data
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    stop_grace_period: 15s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 4g
+    cpus: 2
+    depends_on:
+      console:
+        condition: service_healthy
+volumes:
+  runtime-data:
