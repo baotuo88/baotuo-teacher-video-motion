@@ -132,3 +132,29 @@ def test_api_rejects_unverified_activation(monkeypatch, tmp_path):
                            json={'runtime_id': manifest['id'], 'confirm': True})
     assert response.status_code == 400
     assert not (tmp_path / 'active.json').exists()
+
+
+def test_dependency_install_normalizes_mirror_without_modifying_source(tmp_path, monkeypatch):
+    from app import verification
+    skill = tmp_path / 'skill'
+    skill.mkdir()
+    package = '{"name":"fixture","version":"1.0.0"}'
+    lock = {'lockfileVersion': 3, 'packages': {'node_modules/demo': {
+        'version': '1.0.0', 'resolved': 'https://registry.npmmirror.com/demo/-/demo-1.0.0.tgz',
+        'integrity': 'sha512-fixture'}}}
+    (skill / 'package.json').write_text(package)
+    original = json.dumps(lock)
+    (skill / 'package-lock.json').write_text(original)
+    def install(command, cwd=None, **kwargs):
+        assert command == ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund']
+        copied = json.loads((cwd / 'package-lock.json').read_text())
+        item = copied['packages']['node_modules/demo']
+        assert item['resolved'] == 'https://registry.npmjs.org/demo/-/demo-1.0.0.tgz'
+        assert item['version'] == '1.0.0' and item['integrity'] == 'sha512-fixture'
+        (cwd / 'node_modules').mkdir()
+        (cwd / 'node_modules/fixture').write_text('installed')
+    monkeypatch.setattr(verification, 'run', install)
+    verification.install_dependencies(skill)
+    assert (skill / 'package-lock.json').read_text() == original
+    assert (skill / 'package.json').read_text() == package
+    assert (skill / 'node_modules/fixture').read_text() == 'installed'

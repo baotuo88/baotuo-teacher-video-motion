@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -18,6 +19,42 @@ def run(command: list[str], cwd: Path | None = None, timeout: int = 900) -> None
     subprocess.run(command, cwd=cwd, check=True, timeout=timeout)
 
 
+def install_dependencies(skill: Path) -> None:
+    """Install exact locked bytes via npm's canonical registry, without source edits.
+
+    Upstream lockfiles currently pin an unreliable mirror. Only rewrite that
+    known host in a disposable copy; npm still verifies the original integrity.
+    """
+    lock = json.loads((skill / 'package-lock.json').read_text())
+
+    def normalize(value):
+        if isinstance(value, dict):
+            resolved = value.get('resolved', '')
+            if isinstance(resolved, str) and resolved.startswith('https://registry.npmmirror.com/'):
+                if not value.get('integrity'):
+                    raise RuntimeError_('镜像依赖缺少完整性校验，拒绝安装')
+                value['resolved'] = resolved.replace('https://registry.npmmirror.com/',
+                                                     'https://registry.npmjs.org/', 1)
+            for child in value.values():
+                normalize(child)
+        elif isinstance(value, list):
+            for child in value:
+                normalize(child)
+
+    normalize(lock)
+    with tempfile.TemporaryDirectory(prefix='runtime-deps-') as directory:
+        work = Path(directory)
+        shutil.copy2(skill / 'package.json', work / 'package.json')
+        (work / 'package-lock.json').write_text(json.dumps(lock))
+        run(['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], cwd=work)
+        destination = skill / 'node_modules'
+        if destination.is_symlink():
+            raise RuntimeError_('依赖目录不能是符号链接')
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(work / 'node_modules', destination, symlinks=True)
+
+
 def verify(root: Path, rid: str) -> dict:
     """Execute reviewed upstream code and a silent sample render without paid APIs."""
     path, manifest = release(root, rid)
@@ -26,7 +63,7 @@ def verify(root: Path, rid: str) -> dict:
     # A failed revalidation must invalidate an earlier certificate.
     (path / 'verification.json').unlink(missing_ok=True)
     skill = path / 'skill'
-    run(['npm', 'ci', '--ignore-scripts'], cwd=skill)
+    install_dependencies(skill)
     # FFmpeg comes from the host/container, not an npm lifecycle download.
     with tempfile.TemporaryDirectory(prefix='whiteboard-smoke-') as directory:
         import shutil
