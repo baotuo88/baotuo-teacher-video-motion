@@ -1,0 +1,38 @@
+# Overlay: docker compose -f compose.registry.yaml -f compose.production.yaml up -d
+services:
+  console:
+    environment:
+      COOKIE_SECURE: "1"
+      # Trust only the dedicated proxy IP, not arbitrary forwarded client headers.
+      FORWARDED_ALLOW_IPS: 172.30.99.2
+    networks: [default, ingress]
+  proxy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN to your public hostname}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL for TLS certificates}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      ingress:
+        ipv4_address: 172.30.99.2
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      console:
+        condition: service_healthy
+networks:
+  ingress:
+    ipam:
+      config:
+        - subnet: 172.30.99.0/24
+volumes:
+  caddy-data:
+  caddy-config:

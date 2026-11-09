@@ -10,6 +10,7 @@ import wave
 from pathlib import Path
 
 from .runtime import release
+from . import assets
 
 
 class Cancelled(Exception):
@@ -75,9 +76,13 @@ def compile_project(project: dict, directory: Path):
     for i, scene in enumerate(project['scenes']):
         points = scene['points'] or [scene['narration'][:100]]
         lines = [f"ENGINE.visual('p{i+1:02}', P => {{", f"P.title({js(scene['title'])}, {{accent:'blue'}});"]
+        if scene.get('image_id'):
+            lines.append(f"P.img({js('assets/' + scene['image_id'] + '.png')},980,240,780,580,{{fit:'contain',at:P.c(0)}});")
         for index, point in enumerate(points):
             at = f'P.c(0) + {index * .5}'
-            if scene['layout'] == 'process':
+            if scene.get('image_id'):
+                lines.append(f"P.text({js(point)},{{x:160,y:{260+index*145},w:720,size:32,at:{at},mode:'fade'}});")
+            elif scene['layout'] == 'process':
                 x, y, width = 150 + index * 420, 330, 350
                 lines += [f"P.box({x},{y},350,300,{{at:{at},color:'blue',sw:2}});",
                           f"P.text({js(str(index+1).zfill(2))},{{x:{x+24},y:{y+24},size:32,color:'blue',at:{at},mode:'fade'}});",
@@ -98,14 +103,18 @@ def compile_project(project: dict, directory: Path):
         '<script src="script.js"></script><script src="engine/boot.js"></script><body></body></html>')
 
 
-def create_audio(project, options, directory, skill, runner):
+def create_audio(project, options, directory, skill, runner, store=None):
     audio = directory / 'audio'
     audio.mkdir()
     pages = []
     for index, scene in enumerate(project['scenes']):
         runner.check()
         file = audio / f'p{index+1:02}.wav'
-        if options['audio'] == 'edge':
+        if options['audio'] == 'uploaded':
+            if store is None or not scene.get('audio_id'):
+                raise ProductionError('每页必须绑定上传的 WAV 配音')
+            assets.copy_verified(store, scene['audio_id'], 'audio', file)
+        elif options['audio'] == 'edge':
             mp3 = audio / f'p{index+1:02}.mp3'
             runner.run([sys.executable, str(skill / 'scripts/edge_tts_speak.py'), '--text', scene['narration'],
                         '--voice', options['voice'], '--out', str(mp3)], timeout=180)
@@ -134,9 +143,12 @@ def render(store, job, runtimes):
     directory = work / 'project'
     store.event(job['id'], '编译分镜；使用锁定运行时 ' + job['runtime_id'])
     compile_project(project, directory)
+    for scene in project['scenes']:
+        if scene.get('image_id'):
+            assets.copy_verified(store, scene['image_id'], 'image', directory / 'assets' / (scene['image_id'] + '.png'))
     runner.run([sys.executable, str(skill / 'scripts/ftnew.py'), str(directory), '--title', project['title'], '--style', project['style']])
-    store.event(job['id'], '生成配音' if options['audio'] == 'edge' else '生成静音预览音轨（不是真实配音）')
-    create_audio(project, options, directory, skill, runner)
+    store.event(job['id'], {'edge': '生成在线配音', 'uploaded': '核验并使用逐页 WAV 配音', 'silent': '生成静音预览音轨（不是真实配音）'}[options['audio']])
+    create_audio(project, options, directory, skill, runner, store)
     store.event(job['id'], '截图预览')
     runner.run(['node', str(skill / 'engine/tools/snap.mjs'), '--subs', '1.5'], cwd=directory)
     store.event(job['id'], '渲染 MP4；此阶段可能耗时数分钟')

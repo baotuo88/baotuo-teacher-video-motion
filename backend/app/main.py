@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field
 from .runtime import RuntimeError_, change_summary, release
 from .verification import activate
 
-app = FastAPI(title='baotuo-teacher-video-motion', version='0.2.0')
+app = FastAPI(title='baotuo-teacher-video-motion', version='0.3.0',
+              docs_url=None, redoc_url=None, openapi_url=None)
+from .operations import BodyLimitMiddleware, CapacityError, ensure_capacity, ReadinessProbe
+app.add_middleware(BodyLimitMiddleware)
 ROOT = Path(os.environ.get('RUNTIME_ROOT', '.data/runtimes')).resolve()
 WEB = Path(__file__).resolve().parents[2] / 'web'
 
@@ -99,7 +102,26 @@ from .models import ProjectInput, ProjectUpdate, RenderRequest, ProviderInput, G
 from .store import Store, Conflict, Missing
 
 DATA = Path(os.environ.get('DATA_ROOT', '.data')).resolve()
-LOGIN_ATTEMPTS = {}
+LOGIN_ATTEMPTS = auth.LOGIN_ATTEMPTS
+READINESS = ReadinessProbe()
+
+
+@app.get('/api/system/status', dependencies=[Depends(admin)])
+def system_status():
+    return READINESS.check(DATA, ROOT)
+
+
+@app.get('/ready')
+def ready():
+    state = READINESS.check(DATA, ROOT)
+    return JSONResponse({'status': 'ready' if state['ready'] else 'not_ready'},
+                        status_code=200 if state['ready'] else 503)
+
+
+@app.exception_handler(CapacityError)
+async def capacity_handler(request, error):
+    return JSONResponse(status_code=503, content={'detail': str(error)}, headers={'Retry-After': '60'})
+
 
 
 def store():
@@ -139,21 +161,8 @@ class Login(BaseModel):
 @app.post('/api/auth/login')
 def login(body: Login, request: Request, response: Response):
     auth.check_origin(request)
-    expected = auth.password()
-    ip = request.client.host if request.client else 'unknown'
-    now = time.time()
-    # Single API process in this deployment. Production multi-process needs a shared limiter.
-    for key in list(LOGIN_ATTEMPTS):
-        LOGIN_ATTEMPTS[key] = [t for t in LOGIN_ATTEMPTS[key] if now - t < 300]
-        if not LOGIN_ATTEMPTS[key]:
-            del LOGIN_ATTEMPTS[key]
-    attempts = LOGIN_ATTEMPTS.setdefault(ip, [])
-    if len(attempts) >= 10:
-        raise HTTPException(429, '登录尝试过多，请五分钟后重试')
-    if not secrets.compare_digest(body.password.encode(), expected.encode()):
-        attempts.append(now)
+    if not auth.check_credentials(request, 'admin', body.password):
         raise HTTPException(401, '密码错误')
-    LOGIN_ATTEMPTS.pop(ip, None)
     token = auth.issue()
     response.set_cookie(auth.COOKIE, token, httponly=True, samesite='strict',
                         secure=os.environ.get('COOKIE_SECURE') == '1', max_age=43200)
@@ -280,8 +289,9 @@ def storyboard(pid: str, body: GenerateRequest):
         raise HTTPException(400, '调用可能计费，必须明确确认')
     db = store()
     row = db.provider(body.provider_id)
-    if not json.loads(row['config'])['enabled']:
-        raise HTTPException(409, '服务配置已禁用')
+    config = json.loads(row['config'])
+    if not config['enabled'] or config.get('capability', 'storyboard') != 'storyboard':
+        raise HTTPException(409, '请选择已启用的文本分镜配置')
     return db.enqueue(pid, body.version, 'storyboard',
                       {'provider_id': body.provider_id, 'provider_version': row['updated']},
                       active_runtime(), body.idempotency_key)
@@ -291,6 +301,8 @@ def storyboard(pid: str, body: GenerateRequest):
 def apply_storyboard(jid: str, body: Version):
     db = store()
     item = db.job(jid)
+    if item['kind'] in ('image', 'speech'):
+        return apply_media_result(db, item, body.version)
     if item['kind'] != 'storyboard' or item['status'] != 'succeeded':
         raise HTTPException(409, '没有可应用的分镜结果')
     if body.version != item['snapshot']['project']['version']:
@@ -337,10 +349,117 @@ class RetryRequest(BaseModel):
 def retry_job(jid: str, body: RetryRequest):
     db = store()
     original = db.job(jid)
-    if original['status'] not in ('failed', 'interrupted', 'cancelled'):
+    if original['status'] not in ('failed', 'interrupted', 'cancelled', 'unknown_outcome'):
         raise HTTPException(409, '只有失败、中断或取消的任务可以重试')
     if not body.confirm_cost:
         raise HTTPException(400, '请确认外部请求可能重复计费')
     # Reuse original version/runtime. Changes to project/provider must be resolved explicitly.
     return db.enqueue(original['project_id'], original['snapshot']['project']['version'], original['kind'],
                       original['snapshot']['options'], original['runtime_id'], body.idempotency_key)
+
+
+# Raw-body uploads avoid multipart buffering and unbounded filename/path handling.
+from . import assets
+from starlette.concurrency import run_in_threadpool
+
+
+@app.exception_handler(assets.AssetError)
+async def asset_error_handler(request, error):
+    return JSONResponse(status_code=400, content={'detail': str(error)})
+
+
+@app.get('/api/assets', dependencies=[Depends(admin)])
+def list_assets(kind: str | None = None):
+    return assets.listing(store(), kind)
+
+
+@app.post('/api/assets', dependencies=[Depends(admin)])
+async def upload_asset(request: Request, name: str, kind: str):
+    ensure_capacity(store().root)
+    length = request.headers.get('content-length')
+    if length:
+        try:
+            if int(length) < 0 or int(length) > assets.MAX_UPLOAD:
+                raise HTTPException(413, '素材不能超过 20MB')
+        except ValueError:
+            raise HTTPException(400, '无效 Content-Length')
+    chunks = bytearray()
+    async for chunk in request.stream():
+        if len(chunks) + len(chunk) > assets.MAX_UPLOAD:
+            raise HTTPException(413, '素材不能超过 20MB')
+        chunks.extend(chunk)
+    return await run_in_threadpool(assets.upload, store(), name, kind, bytes(chunks))
+
+
+@app.get('/api/assets/{aid}', dependencies=[Depends(admin)])
+def get_asset(aid: str):
+    return assets.get(store(), aid)
+
+
+@app.get('/api/assets/{aid}/content', dependencies=[Depends(admin)])
+def asset_content(aid: str):
+    file, mime = assets.content_path(store(), aid)
+    return FileResponse(file, media_type=mime)
+
+
+@app.get('/api/assets/{aid}/thumbnail', dependencies=[Depends(admin)])
+def asset_thumbnail(aid: str):
+    file, mime = assets.content_path(store(), aid, thumbnail=True)
+    return FileResponse(file, media_type=mime)
+
+
+@app.delete('/api/assets/{aid}', dependencies=[Depends(admin)])
+def archive_asset(aid: str):
+    return assets.archive(store(), aid)
+
+
+from .models import ModelDiscoveryInput
+
+
+@app.post('/api/providers/models/discover', dependencies=[Depends(admin)])
+def discover_provider_models(body: ModelDiscoveryInput):
+    # Only a model-list request; never save credentials or invoke generation here.
+    return providers.discover_models(store(), body)
+
+
+from .models import MediaGenerateRequest
+
+
+@app.post('/api/projects/{pid}/generate-media', dependencies=[Depends(admin)])
+def generate_media(pid: str, body: MediaGenerateRequest):
+    if not body.confirm_cost:
+        raise HTTPException(400, '生成可能计费，必须确认')
+    db = store()
+    project = db.project(pid)
+    if project['version'] != body.version or not project['confirmed']:
+        raise HTTPException(409, '请保存并确认当前分镜再生成素材')
+    if body.scene_index >= len(project['scenes']):
+        raise HTTPException(400, '页面不存在')
+    row = db.provider(body.provider_id)
+    config = json.loads(row['config'])
+    kind = config.get('capability', 'storyboard')
+    if not config.get('enabled') or kind not in ('image', 'speech'):
+        raise HTTPException(409, '请选择启用的图片或语音配置')
+    scene = project['scenes'][body.scene_index]
+    prompt = body.prompt.strip()
+    if kind == 'image' and not prompt:
+        prompt = ('为白板讲解制作清晰插图，不绘制文字。主题：' + project['title'] +
+                  '。本页：' + scene['title'] + '。要点：' + '；'.join(scene['points']) +
+                  '。口播：' + scene['narration'] + '。风格：' + project['style'])
+    return db.enqueue(pid, body.version, kind, {'provider_id': body.provider_id,
+        'provider_version': row['updated'], 'scene_index': body.scene_index, 'prompt': prompt},
+        active_runtime(), body.idempotency_key)
+
+
+def apply_media_result(db, item, version):
+    if item['status'] != 'succeeded' or not item['result']:
+        raise HTTPException(409, '素材尚未生成成功')
+    old = db.project(item['project_id'])
+    expected = item['snapshot']['project']['version']
+    # A strict revision check also protects reordered/deleted pages, without guessing indices.
+    if version != expected or old['version'] != expected:
+        raise HTTPException(409, '项目已变化，请从素材库手动选择该结果，避免覆盖新稿')
+    document = {key: old[key] for key in ('title', 'topic', 'style', 'scenes')}
+    field = 'image_id' if item['kind'] == 'image' else 'audio_id'
+    document['scenes'][item['result']['scene_index']][field] = item['result']['asset']['id']
+    return db.edit(old['id'], version, ProjectInput.model_validate(document).model_dump())

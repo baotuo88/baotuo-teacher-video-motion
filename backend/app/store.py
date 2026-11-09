@@ -4,6 +4,7 @@ SQLite transactions are the Interface for concurrency: compare-and-swap edits,
 immutable task snapshots, atomic task claiming. No in-process background jobs.
 """
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -25,6 +26,9 @@ class Store:
         root.mkdir(parents=True, exist_ok=True)
         self.database = root / 'studio.sqlite3'
         with self.connect() as db:
+            version = db.execute('PRAGMA user_version').fetchone()[0]
+            if version > 2:
+                raise RuntimeError('数据库版本高于本程序，请勿使用旧镜像覆盖新数据库')
             db.executescript('''
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS projects (
@@ -45,8 +49,12 @@ class Store:
             CREATE TABLE IF NOT EXISTS providers (
                 id TEXT PRIMARY KEY, config TEXT NOT NULL, secret TEXT NOT NULL,
                 updated REAL NOT NULL);
-            PRAGMA user_version=1;
+            CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, metadata TEXT NOT NULL,
+                created REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
             ''')
+            db.execute('PRAGMA user_version=2')
 
     @contextmanager
     def connect(self):
@@ -80,6 +88,8 @@ class Store:
         pid, now = uuid.uuid4().hex, time.time()
         encoded = json.dumps(document, ensure_ascii=False)
         with self.connect() as db:
+            from .assets import validate_references
+            validate_references(db, document)
             db.execute('INSERT INTO projects VALUES (?,1,NULL,?,?,?)', (pid, encoded, now, now))
             db.execute('INSERT INTO revisions VALUES (?,1,?)', (pid, encoded))
         return self.project(pid)
@@ -87,6 +97,8 @@ class Store:
     def edit(self, pid, version, document):
         encoded = json.dumps(document, ensure_ascii=False)
         with self.connect() as db:
+            from .assets import validate_references
+            validate_references(db, document)
             if db.execute('UPDATE projects SET document=?,version=version+1,confirmed=NULL,updated=? '
                           'WHERE id=? AND version=?', (encoded, time.time(), pid, version)).rowcount != 1:
                 raise Conflict('项目已在其他页面修改，请刷新后重试')
@@ -119,10 +131,17 @@ class Store:
             project = self.project_row(row)
             if project['version'] != version:
                 raise Conflict('项目已变化，请刷新后提交')
+            if kind == 'render' and options.get('audio') == 'uploaded' and any(
+                    not scene.get('audio_id') for scene in project['scenes']):
+                raise Conflict('上传配音模式需要为每一页选择 WAV 素材')
             if kind == 'render' and not project['confirmed']:
                 raise Conflict('必须先确认当前版本分镜')
             if db.execute("SELECT id FROM jobs WHERE project_id=? AND status IN ('queued','running')", (pid,)).fetchone():
                 raise Conflict('本项目已有待处理任务')
+            from .operations import ensure_capacity, CapacityError
+            ensure_capacity(self.root)
+            if db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= int(os.environ.get('MAX_PENDING_JOBS', '20')):
+                raise CapacityError('任务队列已满，请等待已有任务完成')
             jobid, now = uuid.uuid4().hex, time.time()
             db.execute('INSERT INTO jobs (id,project_id,kind,status,snapshot,runtime_id,idempotency,request_hash,created,updated) '
                        'VALUES (?,?,?,?,?,?,?,?,?,?)', (jobid, pid, kind, 'queued',

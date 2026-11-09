@@ -1,0 +1,10 @@
+{
+    email {$ACME_EMAIL}
+}
+{$DOMAIN} {
+    header Strict-Transport-Security "max-age=31536000"
+    request_body {
+        max_size 21MB
+    }
+    reverse_proxy console:8000
+}
