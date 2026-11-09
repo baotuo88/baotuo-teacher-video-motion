@@ -20,7 +20,7 @@
 
 ```bash
 # 先拉取已通过 CI 的指定镜像；以下是标签示例，替换为实际发布版本
-# .env: IMAGE=ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-实际提交短哈希
+# .env: IMAGE=ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-73afc6f
 # .env: DOMAIN=你的域名，ACME_EMAIL=证书邮箱
 # .env: ADMIN_PASSWORD=随机密码，PROVIDER_ENCRYPTION_KEY=Fernet密钥
 chmod 600 .env

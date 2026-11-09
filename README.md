@@ -8,14 +8,18 @@
 
 ## 最新发布进展
 
-已推送核心功能与上线加固。首轮新 CI 的测试、镜像构建、启动检查通过，真实渲染门禁发现上游 npm 镜像站 HTTP500，阻止了发布。
-现增加不改动上游源码的依赖安装适配：临时副本使用 npm 官方下载地址，保留锁定版本与 integrity 校验；最终发布结果以 GitHub Actions 为准。
+**镜像已发布，GitHub Actions 全部门禁通过。** 发布代码：`73afc6f`（Linux amd64）。
+
+- [CI 验收记录](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/42644496842)：测试、镜像构建、启动/持久化检查、真实容器视频渲染、GHCR发布全部成功。
+- 固定镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-73afc6f`，已验证匿名读取。
+- 镜像摘要：`sha256:d71ec268da9567d7bbac71fe26b0bd1852636bc9513c1ac4d2e8972c9d23035c`。
+- 真实供应商与公网服务器 HTTPS 尚未验收；镜像发布不等于已经部署到你的服务器。
 
 ## 本轮上线加固
 
 新增 HTTPS/Caddy 部署覆盖配置、独立 Worker 心跳与容器健康检查、后台“运行状态”面板、
 请求体限制、统一登录/Basic 限速、磁盘/队列准入限制、日志轮转，以及可校验的停机备份/空目录恢复工具。
-CI 增加固定上游版本真实容器渲染门禁；**本地构建受 Docker Hub 连接超时阻挡，新增门禁的实际结果以本次 GitHub Actions 为准**。
+CI 增加固定上游版本真实容器渲染门禁；**本地 Docker Hub 网络受限，但 GitHub Actions 的镜像构建和真实容器渲染已通过**。
 
 部署、运行时初始化、备份、恢复、升级步骤见 **[单机上线手册](docs/deployment.md)**。
 本地回归 **121 项通过**，已完成隔离数据的换目录恢复演练；详见[上线加固验收记录](docs/verification/2026-11-09-release-hardening.md)。

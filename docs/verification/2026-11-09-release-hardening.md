@@ -26,15 +26,16 @@
   4 个成片产物散列一致，3 个模拟服务配置保留，运行时源码校验通过，恢复后的链接全部指向恢复目录。
   报告：`.data/e2e/recovery-report.json`（不入 Git）。
 
-## 未通过/未执行的发布门禁
+## 当前发布状态与剩余验收
 
-- 本地 Docker build 被 Docker Hub token 请求连接超时阻挡，尚未得到此次新镜像。
-- 新增 CI 容器渲染门禁尚未推送执行，不能引用旧 CI 成功记录证明新版本可用。
-- 没有真实供应商 API 端到端验收、没有公网域名/TLS 验收、没有真实生产数据卷恢复演练。
-- 代码仍为本地修改，未提交/推送；GHCR latest 不包含本轮改动。
+- 本地 Docker build 曾受 Docker Hub 网络超时阻挡，已通过 GitHub Actions 完成新镜像构建与真实容器渲染。
+- 代码已推送；`73afc6f` 的 [Actions 42644496842](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/42644496842) 全部成功。
+- `ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-73afc6f` 已发布并确认可匿名读取；核对时 latest 与其摘要相同。
+- 镜像索引摘要：`sha256:d71ec268da9567d7bbac71fe26b0bd1852636bc9513c1ac4d2e8972c9d23035c`，支持 Linux amd64。
+- 当前本地回归121项通过；新增依赖下载适配测试保留原始锁文件与完整性字段。
+- 剩余：真实供应商 API 端到端验收、公网域名/TLS 验收、真实生产数据卷恢复演练。
 
-结论：单机自部署候选版本的本地验收有所完善，但不能宣称已经正式上线。
-部署步骤及剩余人工门禁见 `docs/deployment.md`。
+结论：已发布通过容器渲染验收的单机部署候选镜像；尚未部署到用户服务器。
 
 ## 发布执行补记
 
@@ -42,3 +43,5 @@
 - 真实渲染门禁失败于依赖安装：上游锁文件使用的 registry.npmmirror.com 返回HTTP500（远端数据库错误）。GHCR发布按门禁跳过。
 - 补充临时依赖目录安装适配：仅替换已知镜像域名为 registry.npmjs.org，保留版本、完整性字段，不修改上游原始锁文件；增加回归测试。
 - 以上取代本文此前“尚未推送/CI尚未执行”的历史状态，后续运行以 Actions 为准。
+
+第二轮发布：`73afc6f` 修复后所有门禁通过，成功发布GHCR，未跳过渲染检查。
