@@ -1,0 +1,9 @@
+{
+  "name": "baotuo-browser-regressions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated browser regression dependencies, not part of the runtime image",
+  "devDependencies": {
+    "playwright": "1.65.0"
+  }
+}

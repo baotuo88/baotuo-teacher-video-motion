@@ -5,14 +5,25 @@ const state = {
   tab: "projects",
   project: null,
   dirty: false,
+  draftConflict: null,
+  activeScene: 0,
+  sceneScroll: 0,
+  allScenes: false,
+  stage: "storyboard",
+  liveJobs: [],
+  historySession: null,
+  liveEvents: {},
   providers: [],
   assets: new Map(),
+  settingsSession: null,
   renderOptions: {
     audio: "silent",
     voice: "zh-CN-XiaoxiaoNeural",
     provider: "",
   },
-  poll: null,
+  projectStream: null,
+  projectJobSignature: "",
+  syncingProject: false,
 };
 const labels = {
   queued: "等待制作",
@@ -73,10 +84,13 @@ async function api(path, options = {}) {
   }
   if (!r.ok) {
     if (r.status === 401) showLogin();
-    throw Error(
-      typeof data.detail === "string"
-        ? data.detail
-        : JSON.stringify(data.detail),
+    throw Object.assign(
+      Error(
+        typeof data.detail === "string"
+          ? data.detail
+          : JSON.stringify(data.detail),
+      ),
+      { status: r.status },
     );
   }
   return data;
@@ -91,12 +105,22 @@ function safe(action) {
   };
 }
 function button(text, action, cls = "") {
-  return el(
-    "button",
-    { type: "button", class: cls, onclick: safe(action) },
-    text,
+  const node = el("button", { type: "button", class: cls }, text);
+  node.addEventListener(
+    "click",
+    safe(async (event) => {
+      if (node.disabled) return;
+      node.disabled = true;
+      try {
+        await action(event);
+      } finally {
+        node.disabled = false;
+      }
+    }),
   );
+  return node;
 }
+
 function badge(status) {
   return el("span", { class: "badge " + status }, labels[status] || status);
 }
@@ -116,8 +140,12 @@ function field(label, node) {
 function empty(title, text) {
   return el("div", { class: "empty" }, el("h3", {}, title), el("p", {}, text));
 }
+function stopProjectStream() {
+  state.projectStream?.close();
+  state.projectStream = null;
+}
 function showLogin() {
-  clearInterval(state.poll);
+  stopProjectStream();
   $("#login").hidden = false;
   $("#app").hidden = true;
 }
@@ -126,11 +154,7 @@ async function enter() {
   state.csrf = d.csrf;
   $("#login").hidden = true;
   $("#app").hidden = false;
-  await navigate("projects");
-  state.poll = setInterval(() => {
-    if (state.tab === "jobs" && !document.hidden)
-      loadJobs(false).catch(() => {});
-  }, 3000);
+  await restoreRoute();
 }
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -157,17 +181,23 @@ function canLeave() {
   return !state.dirty || confirm("有未保存修改，确定离开吗？");
 }
 async function navigate(tab) {
-  if (!canLeave()) return;
+  if (!canLeave()) {
+    syncCurrentRoute();
+    return;
+  }
+  if (state.settingsSession) await state.settingsSession.pending;
+  stopProjectStream();
   state.dirty = false;
   state.tab = tab;
+  document.body.dataset.view = tab;
   state.project = null;
+  history.replaceState(null, "", "#/" + tab);
   notice("");
   document
     .querySelectorAll("[data-nav]")
     .forEach((n) => n.classList.toggle("active", n.dataset.nav === tab));
   const titles = {
     projects: "我的视频项目",
-    jobs: "制作任务",
     assets: "素材库",
     providers: "模型服务",
     runtimes: "Skill 运行时",
@@ -179,7 +209,6 @@ async function navigate(tab) {
   $("#content").replaceChildren();
   await {
     projects: loadProjects,
-    jobs: loadJobs,
     assets: loadAssets,
     providers: loadProviders,
     runtimes: loadRuntimes,
@@ -208,6 +237,8 @@ async function loadProjects() {
         "article",
         {
           class: "card",
+          "data-project-title": (p.title + " " + p.topic).toLowerCase(),
+          "data-confirmed": String(p.confirmed),
           onclick: safe(() => openProject(p.id)),
           tabindex: 0,
           onkeydown: safe((e) => {
@@ -250,50 +281,273 @@ async function loadProjects() {
       ),
     );
   }
+  const search = el("input", {
+    type: "search",
+    placeholder: "搜索项目名称或讲解要求",
+    "aria-label": "搜索项目",
+  });
+  const count = el("span", { class: "muted", "aria-live": "polite" });
+  const filter = select(
+    { all: "全部项目", draft: "仅看草稿", confirmed: "已确认分镜" },
+    "all",
+    applyFilter,
+  );
+  filter.setAttribute("aria-label", "项目状态筛选");
+  function applyFilter() {
+    let visible = 0;
+    for (const card of grid.children) {
+      const matches =
+        card.dataset.projectTitle.includes(search.value.trim().toLowerCase()) &&
+        (filter.value === "all" ||
+          card.dataset.confirmed === String(filter.value === "confirmed"));
+      card.hidden = !matches;
+      if (matches) visible++;
+    }
+    count.textContent = visible + " / " + items.length + " 个项目";
+    noMatch.hidden = visible > 0 || !items.length;
+  }
+  const noMatch = empty(
+    "没有匹配的项目",
+    "试试其他关键词，或切换项目状态筛选。",
+  );
+  search.addEventListener("input", applyFilter);
   $("#content").replaceChildren(
     el(
       "section",
-      { class: "hero" },
+      { class: "workspace-intro" },
       el(
         "div",
         {},
-        el("h2", {}, "把复杂的事，讲得简单一些。"),
+        el("p", { class: "eyebrow" }, "创作工作台"),
+        el("h2", {}, "从想法，到一段讲解视频"),
         el(
           "p",
-          {},
-          "编写分镜、选择画面、交给后台制作。每一次创作都有独立版本，每一次更新都可追溯。",
+          { class: "muted" },
+          "选择项目继续编辑，或新建项目，用 AI 起草第一份分镜。",
         ),
       ),
-      el("div", { class: "sketch" }, "✎"),
+      el(
+        "div",
+        { class: "workspace-stats" },
+        el("strong", {}, String(items.length)),
+        el("span", {}, "视频项目"),
+      ),
     ),
-    el("p", { class: "section-label" }, "全部项目 · " + items.length),
+    el(
+      "div",
+      { class: "project-tools" },
+      search,
+      filter,
+      count,
+      button("回收站", showProjectTrash),
+    ),
     items.length
       ? grid
-      : empty(
-          "第一段讲解，从这里开始",
-          "点击右上角「新建视频」，或先在模型服务中配置分镜模型。",
-        ),
+      : empty("还没有视频项目", "点击右上角「新建视频」开始创作。"),
+    noMatch,
   );
+  applyFilter();
 }
-async function openProject(id) {
-  if (!canLeave()) return;
+async function showProjectTrash() {
+  const dialog = el(
+    "dialog",
+    { class: "project-trash-dialog" },
+    el("h2", {}, "项目回收站"),
+    el(
+      "p",
+      { class: "note" },
+      "恢复后重新显示在项目列表，分镜历史、制作配置和任务结果入口保留。这里不会删除素材或成片，也不会重新执行任务。",
+    ),
+    el(
+      "p",
+      { class: "note" },
+      "仅支持本次功能启用后移入的项目；此前已永久删除的项目不能自动恢复。",
+    ),
+  );
+  const list = el("div", { class: "trash-list" });
+  const status = el("p", { class: "note", "aria-live": "polite" });
+  let changed = false;
+  async function refresh() {
+    status.textContent = "正在读取回收站…";
+    try {
+      const items = await api("/project-trash");
+      if (!dialog.isConnected) return;
+      list.replaceChildren(
+        ...items.map((project) =>
+          el(
+            "article",
+            { class: "trash-project" },
+            el(
+              "div",
+              {},
+              el("h3", {}, project.title),
+              el(
+                "p",
+                { class: "muted" },
+                project.scenes.length +
+                  " 页 · v" +
+                  project.version +
+                  " · 移入时间 " +
+                  new Date(project.deleted_at * 1000).toLocaleString(),
+              ),
+            ),
+            button("恢复项目", async () => {
+              try {
+                await api("/project-trash/" + project.id + "/restore", {
+                  method: "POST",
+                  body: { version: project.version },
+                });
+                changed = true;
+                await refresh();
+                status.textContent =
+                  "已恢复「" +
+                  project.title +
+                  "」，关闭回收站即可在项目列表继续编辑。";
+              } catch (error) {
+                status.textContent =
+                  "恢复未完成：" +
+                  error.message +
+                  "。请刷新回收站核对，未覆盖现有项目。";
+              }
+            }),
+          ),
+        ),
+      );
+      if (!items.length)
+        list.append(empty("回收站为空", "移入回收站的项目会显示在这里。"));
+      status.textContent =
+        "共 " + items.length + " 个项目；当前不提供彻底删除。";
+    } catch (error) {
+      status.textContent = "读取失败：" + error.message + "，可点击刷新重试。";
+    }
+  }
+  dialog.append(
+    status,
+    list,
+    el(
+      "div",
+      { class: "actions" },
+      button("刷新回收站", refresh),
+      button("关闭", () => dialog.close()),
+    ),
+  );
+  dialog.addEventListener(
+    "close",
+    () => {
+      dialog.remove();
+      if (changed && state.tab === "projects")
+        loadProjects().catch((error) => notice(error.message));
+    },
+    { once: true },
+  );
+  document.body.append(dialog);
+  dialog.showModal();
+  await refresh();
+}
+async function openProject(id, stage = null) {
+  if (!canLeave()) {
+    syncCurrentRoute();
+    return;
+  }
+  if (state.settingsSession) await state.settingsSession.pending;
+  stopProjectStream();
+  const sameProject = state.project?.id === id;
   state.project = await api("/projects/" + id);
+  state.draftConflict = null;
   state.dirty = false;
   state.tab = "editor";
+  document.body.dataset.view = "editor";
+  if (!sameProject) {
+    state.activeScene = 0;
+    state.sceneScroll = 0;
+  }
+  state.allScenes = false;
+  state.stage = stage || (state.project.scenes.length ? "storyboard" : "brief");
+  state.liveJobs = [];
+  state.historySession = {
+    pid: id,
+    jobs: new Map(),
+    cursor: undefined,
+    loading: false,
+  };
+  state.liveEvents = {};
   state.providers = await api("/providers");
-  state.renderOptions = {
-    audio: "silent",
-    voice: "zh-CN-XiaoxiaoNeural",
-    provider: "",
+  const settings = await api("/projects/" + id + "/production-settings");
+  state.renderOptions = settings;
+  state.settingsSession = {
+    id,
+    saved: { ...settings },
+    pending: Promise.resolve(),
+    error: null,
+    saving: 0,
   };
   await hydrateAssets();
   renderEditor();
 }
+// A separate settings revision avoids invalidating in-flight content generation.
+function saveProductionSetting(key, value) {
+  const session = state.settingsSession;
+  state.renderOptions[key] = value;
+  session.saving++;
+  updateProductionSettingsStatus();
+  session.pending = session.pending.then(async () => {
+    try {
+      if (session.error) throw session.error;
+      session.saved = await api(
+        "/projects/" + session.id + "/production-settings",
+        {
+          method: "PUT",
+          body: { ...session.saved, [key]: value },
+        },
+      );
+      session.error = null;
+    } catch (error) {
+      session.error = error;
+      if (state.settingsSession === session) {
+        notice(
+          "制作设置未保存：" + error.message + "。请重新打开项目核对设置。",
+        );
+      }
+    } finally {
+      session.saving--;
+      if (state.settingsSession === session) updateProductionSettingsStatus();
+    }
+  });
+}
+function productionSettingsMessage() {
+  const session = state.settingsSession;
+  return session?.error
+    ? "制作设置保存失败，请重新打开项目核对"
+    : session?.saving
+      ? "正在保存制作设置…"
+      : "制作设置已保存 · 本项目自动记忆";
+}
+function updateProductionSettingsStatus() {
+  document.querySelectorAll(".production-settings-state").forEach((node) => {
+    node.textContent = productionSettingsMessage();
+  });
+}
+async function requireSavedProductionSettings() {
+  const session = state.settingsSession;
+  await session.pending;
+  if (session.error)
+    throw Error("制作设置未保存，请重新打开项目核对后再提交。");
+}
+window.addEventListener("beforeunload", (event) => {
+  // Draft protection already handled elsewhere; settings saves are normally very short.
+  if (state.settingsSession?.error || state.settingsSession?.saving) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
 function change(fn) {
   fn();
   state.dirty = true;
   const n = $("#save-state");
   if (n) n.textContent = "有未保存修改";
+  const readiness = $(".export-summary .note");
+  if (readiness)
+    readiness.textContent = "有未保存修改，请先保存并重新确认分镜。";
 }
 function input(value, changeFn, max) {
   return el("input", {
@@ -313,25 +567,198 @@ function area(value, changeFn, rows = 3, max = 600) {
     value,
   );
 }
+function projectDocument(project) {
+  return structuredClone(
+    Object.fromEntries(
+      ["title", "topic", "style", "scenes"].map((key) => [key, project[key]]),
+    ),
+  );
+}
+function markDraftConflict(pid) {
+  if (state.project?.id !== pid) return;
+  state.draftConflict = pid;
+  const banner = $("#draft-conflict");
+  if (banner) banner.hidden = false;
+  notice(
+    "服务器已有新版本，当前草稿未被覆盖。请使用「草稿恢复」对比、导出或另存为新项目。",
+  );
+}
+function downloadDraft(project, draft) {
+  const url = URL.createObjectURL(
+    new Blob(
+      [
+        JSON.stringify(
+          {
+            format: "baotuo-project-draft-v1",
+            source_project_id: project.id,
+            source_version: project.version,
+            exported_at: new Date().toISOString(),
+            document: draft,
+          },
+          null,
+          2,
+        ),
+      ],
+      { type: "application/json" },
+    ),
+  );
+  const link = el("a", {
+    href: url,
+    download: "project-draft-" + project.id + "-v" + project.version + ".json",
+  });
+  documentBodyDownload(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function documentBodyDownload(link) {
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+async function showDraftRecovery() {
+  const project = state.project;
+  const draft = projectDocument(project);
+  const dialog = el(
+    "dialog",
+    { class: "draft-recovery-dialog" },
+    el("h2", {}, "草稿恢复与版本对比"),
+    el(
+      "p",
+      { class: "note" },
+      "左侧是打开此窗口时的草稿快照。不会自动合并或覆盖服务器版本；素材仅保留引用，JSON 不包含素材文件。",
+    ),
+  );
+  const close = () => {
+    dialog.close();
+    dialog.remove();
+  };
+  const remote = el(
+    "section",
+    {},
+    el("h3", {}, "服务器版本"),
+    el("p", {}, "正在读取…"),
+  );
+  const columns = el(
+    "div",
+    { class: "draft-compare" },
+    el(
+      "section",
+      {},
+      el("h3", {}, "本地草稿 · 基于 v" + project.version),
+      el("pre", { class: "draft-document" }, JSON.stringify(draft, null, 2)),
+    ),
+    remote,
+  );
+  const result = el("p", { class: "note", "aria-live": "polite" });
+  const saveAs = button("另存为新项目", async () => {
+    // Stay on the source draft; no navigation or mutation of the original project.
+    let copy;
+    try {
+      copy = await api("/projects", {
+        method: "POST",
+        body: { ...draft, title: draft.title.slice(0, 50) + " · 草稿副本" },
+      });
+    } catch (error) {
+      result.textContent =
+        "另存未完成：" +
+        error.message +
+        "。草稿仍保留，可先导出；网络失败时请先检查项目列表，避免重复创建。";
+      return;
+    }
+    result.replaceChildren(
+      el("span", {}, "草稿已保存为独立项目，不改变原项目。"),
+      button("打开草稿副本", async () => {
+        close();
+        await openProject(copy.id);
+      }),
+    );
+    saveAs.hidden = true;
+  });
+  dialog.append(
+    columns,
+    result,
+    el(
+      "div",
+      { class: "actions" },
+      button("导出草稿 JSON", () => downloadDraft(project, draft)),
+      saveAs,
+      button("关闭", close),
+    ),
+  );
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  try {
+    const latest = await api("/projects/" + project.id);
+    if (!dialog.isConnected) return;
+    const server = projectDocument(latest);
+    remote.replaceChildren(
+      el("h3", {}, "服务器 · v" + latest.version),
+      el(
+        "p",
+        { class: "note" },
+        JSON.stringify(draft) === JSON.stringify(server)
+          ? "内容相同"
+          : "内容有差异，请逐项核对；不会自动合并。",
+      ),
+      el("pre", { class: "draft-document" }, JSON.stringify(server, null, 2)),
+    );
+  } catch (error) {
+    remote.replaceChildren(
+      el("h3", {}, "服务器版本不可用"),
+      el(
+        "p",
+        { class: "danger" },
+        error.message + "。仍可导出本地草稿，或尝试另存项目。",
+      ),
+    );
+  }
+}
 async function saveProject() {
   const p = state.project;
-  const updated = await api("/projects/" + p.id, {
-    method: "PUT",
-    body: {
-      version: p.version,
-      title: p.title,
-      topic: p.topic,
-      style: p.style,
-      scenes: p.scenes,
-    },
-  });
+  const document = projectDocument(p);
+  let updated;
+  try {
+    updated = await api("/projects/" + p.id, {
+      method: "PUT",
+      body: { version: p.version, ...document },
+    });
+  } catch (error) {
+    if ([404, 409].includes(error.status)) {
+      markDraftConflict(p.id);
+      return;
+    }
+    throw error;
+  }
+  if (state.project !== p) return;
+  state.draftConflict = null;
+  if ($("#draft-conflict")) $("#draft-conflict").hidden = true;
+  if (
+    JSON.stringify(projectDocument(state.project)) !== JSON.stringify(document)
+  ) {
+    // The user kept typing during the save; only advance the base, never erase input.
+    state.project.version = updated.version;
+    state.project.confirmed = false;
+    notice("已保存提交时的内容；你随后输入的修改仍未保存。");
+    return;
+  }
   state.project = updated;
   state.dirty = false;
+  state.draftConflict = null;
   renderEditor();
   notice("已保存 v" + updated.version + "；如需制作，请确认分镜。");
 }
 function renderEditor() {
+  const previousOutline = $(".scene-outline");
+  if (
+    previousOutline?.clientWidth &&
+    previousOutline.dataset.projectId === state.project.id
+  )
+    state.sceneScroll = previousOutline.scrollLeft;
   const p = state.project;
+  state.activeScene = Math.max(
+    0,
+    Math.min(state.activeScene, p.scenes.length - 1),
+  );
   $("#heading").textContent = p.title;
   $("#crumb").textContent = "视频项目 / 分镜编辑";
   $("#new-project").hidden = true;
@@ -341,19 +768,36 @@ function renderEditor() {
   const scenes = el("div", { class: "scene-list" });
   const outline = el(
     "div",
-    { class: "scene-outline" },
+    {
+      class: "scene-outline",
+      "data-project-id": p.id,
+      onscroll: (e) => {
+        state.sceneScroll = e.currentTarget.scrollLeft;
+      },
+    },
     el("span", { class: "muted" }, p.scenes.length + " 页分镜"),
   );
   p.scenes.forEach((s, i) => {
     outline.append(
       button(
         String(i + 1).padStart(2, "0") + " " + s.title,
-        () =>
-          $("#scene-" + i).scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          }),
-        "outline-link",
+        () => {
+          state.activeScene = i;
+          if (state.allScenes)
+            $("#scene-" + i).scrollIntoView({
+              behavior: "smooth",
+              block: "start",
+            });
+          for (const card of scenes.querySelectorAll(".scene"))
+            card.hidden = !state.allScenes && card.id !== "scene-" + i;
+          for (const [index, tab] of [
+            ...outline.querySelectorAll(".outline-link"),
+          ].entries()) {
+            tab.classList.toggle("selected", index === i);
+            tab.setAttribute("aria-pressed", String(index === i));
+          }
+        },
+        "outline-link" + (i === state.activeScene ? " selected" : ""),
       ),
     );
     const card = el(
@@ -363,7 +807,15 @@ function renderEditor() {
         "div",
         { class: "scene-heading" },
         el("span", { class: "scene-number" }, String(i + 1).padStart(2, "0")),
-        input(s.title, (v) => (s.title = v), 50),
+        input(
+          s.title,
+          (v) => {
+            s.title = v;
+            outline.children[i + 1].textContent =
+              String(i + 1).padStart(2, "0") + " " + v;
+          },
+          50,
+        ),
         el(
           "div",
           { class: "scene-controls" },
@@ -376,6 +828,7 @@ function renderEditor() {
                     p.scenes[i - 1],
                   ]),
               );
+              state.activeScene = i - 1;
               renderEditor();
             }
           }),
@@ -388,6 +841,7 @@ function renderEditor() {
                     p.scenes[i + 1],
                   ]),
               );
+              state.activeScene = i + 1;
               renderEditor();
             }
           }),
@@ -451,14 +905,12 @@ function renderEditor() {
           )
         : null,
     );
+    card.hidden = !state.allScenes && i !== state.activeScene;
     scenes.append(card);
   });
   if (!p.scenes.length)
     scenes.append(
-      empty(
-        "先写下故事的第一幕",
-        "添加一页分镜，或展开右侧「AI 分镜」生成初稿。",
-      ),
+      empty("先写下故事的第一幕", "添加一页分镜，或切换「AI 分镜」生成初稿。"),
     );
   scenes.append(
     button(
@@ -476,6 +928,7 @@ function renderEditor() {
             audio_id: null,
           }),
         );
+        state.activeScene = p.scenes.length - 1;
         renderEditor();
       },
       "wide add-scene",
@@ -493,8 +946,14 @@ function renderEditor() {
       state.providers.find(
         (x) => x.enabled && (x.capability || "storyboard") === "storyboard",
       )?.id,
-    (v) => (state.renderOptions.provider = v),
+    (v) => saveProductionSetting("provider", v),
   );
+  if (state.renderOptions.provider && !provider.value) {
+    provider.prepend(
+      el("option", { value: "" }, "已保存的服务不可用，请重新选择"),
+    );
+    provider.value = "";
+  }
   const audio = select(
     {
       silent: "静音预览 · 无需联网",
@@ -503,7 +962,7 @@ function renderEditor() {
     },
     state.renderOptions.audio,
     (v) => {
-      state.renderOptions.audio = v;
+      saveProductionSetting("audio", v);
       voiceWrap.hidden = v !== "edge";
       audioNote.textContent = audioHelp(v);
     },
@@ -515,7 +974,7 @@ function renderEditor() {
       "en-US-JennyNeural": "Jenny · English",
     },
     state.renderOptions.voice,
-    (v) => (state.renderOptions.voice = v),
+    (v) => saveProductionSetting("voice", v),
   );
   const voiceWrap = field("在线配音音色", voice);
   voiceWrap.hidden = audio.value !== "edge";
@@ -546,13 +1005,19 @@ function renderEditor() {
   );
   const ai = el(
     "details",
-    { class: "settings-group" },
+    { class: "settings-group", open: "" },
     el("summary", {}, "AI 分镜"),
     field("模型服务", provider),
+    el(
+      "p",
+      { class: "note production-settings-state", "aria-live": "polite" },
+      productionSettingsMessage(),
+    ),
     button(
       "生成分镜",
       async () => {
         if (state.dirty) throw Error("请先保存修改");
+        await requireSavedProductionSettings();
         if (!provider.value) throw Error("请先配置模型服务");
         if (!confirm("将调用外部模型，可能产生费用，是否继续？")) return;
         await api("/projects/" + p.id + "/storyboard", {
@@ -564,14 +1029,14 @@ function renderEditor() {
             confirm_cost: true,
           },
         });
-        await navigate("jobs");
+        await announceSubmission();
       },
       "wide",
     ),
     el(
       "p",
       { class: "note" },
-      "生成结果先审阅再应用，不会自动覆盖正在编辑的内容。",
+      "生成成功后自动应用为新草稿，并给出检查建议；版本冲突时保留结果，不覆盖新稿。",
     ),
   );
   const exportGroup = el(
@@ -586,10 +1051,16 @@ function renderEditor() {
     field("音轨来源", audio),
     voiceWrap,
     audioNote,
+    el(
+      "p",
+      { class: "note production-settings-state", "aria-live": "polite" },
+      productionSettingsMessage(),
+    ),
     button(
       "提交制作任务 →",
       async () => {
         if (state.dirty) throw Error("请先保存修改");
+        await requireSavedProductionSettings();
         if (!p.confirmed) throw Error("请先确认当前分镜");
         if (audio.value === "uploaded" && p.scenes.some((s) => !s.audio_id))
           throw Error("请为每一页绑定 WAV 配音");
@@ -605,15 +1076,10 @@ function renderEditor() {
             idempotency_key: crypto.randomUUID(),
           },
         });
-        await navigate("jobs");
+        await announceSubmission();
       },
       "primary wide",
     ),
-  );
-  const side = el(
-    "div",
-    { class: "editor-side" },
-    el("div", { class: "settings-stack" }, settings, ai, exportGroup),
   );
   const save = button("保存修改", saveProject);
   const confirmButton = button(
@@ -677,8 +1143,34 @@ function renderEditor() {
       el(
         "div",
         { class: "actions" },
-        button("← 项目", () => navigate("projects"), "quiet"),
+
         button("历史版本", history),
+        button("草稿恢复", showDraftRecovery),
+        button(
+          "删除项目",
+          async () => {
+            if (
+              !confirm(
+                "将「" +
+                  p.title +
+                  "」移入回收站？项目、编辑历史、制作配置和成片会保留，可在项目列表的回收站恢复。有活动任务时不能移入。" +
+                  (state.dirty
+                    ? "当前未保存修改不会进入回收站，请先通过草稿恢复导出或另存。"
+                    : ""),
+              )
+            )
+              return;
+            await api("/projects/" + p.id, {
+              method: "DELETE",
+              body: { version: p.version, confirm: true },
+            });
+            state.dirty = false;
+            await navigate("projects");
+            notice("项目已移入回收站，可从项目列表恢复；历史和成片已保留。");
+          },
+          "quiet danger",
+        ),
+
         button("复制", async () => {
           if (state.dirty) throw Error("请先保存");
           const copy = await api("/projects/" + p.id + "/duplicate", {
@@ -701,16 +1193,69 @@ function renderEditor() {
         confirmButton,
       ),
     ),
-    outline,
-    el("div", { class: "editor-grid" }, scenes, side),
+    el(
+      "div",
+      { class: "workflow-strip" },
+      el("span", { class: !p.scenes.length ? "current" : "" }, "01 编写分镜"),
+      el(
+        "span",
+        { class: p.scenes.length && !p.confirmed ? "current" : "" },
+        "02 保存与确认",
+      ),
+      el("span", { class: p.confirmed ? "current" : "" }, "03 配音与导出"),
+    ),
+    el(
+      "div",
+      { class: "scene-switcher" },
+      outline,
+      button(state.allScenes ? "逐页编辑" : "查看全部", () => {
+        state.allScenes = !state.allScenes;
+        renderEditor();
+      }),
+    ),
+    el("div", { class: "editor-grid" }, scenes),
+    el(
+      "section",
+      { id: "project-tasks", class: "project-tasks" },
+      el(
+        "div",
+        { class: "panel-title" },
+        el("h2", {}, "项目制作任务"),
+        el(
+          "small",
+          { id: "stream-state", "aria-live": "polite" },
+          "连接实时日志…",
+        ),
+      ),
+      el(
+        "p",
+        { class: "muted" },
+        "生成进度、阶段日志与成片都留在项目中。日志实时更新，不代表模型逐字输出。",
+      ),
+      el("div", { id: "project-job-list" }),
+      el(
+        "div",
+        { class: "task-history-tools" },
+        el(
+          "p",
+          { id: "task-history-status", class: "note", "aria-live": "polite" },
+          "实时显示最近任务，历史记录可继续加载。",
+        ),
+        button("加载更早任务", loadOlderProjectJobs, "history-more"),
+      ),
+    ),
   );
+  mountStudio(p, scenes, outline, settings, ai, exportGroup);
+  if (state.historySession?.pid === p.id) {
+    renderJobs(mergedProjectJobs(), $("#project-job-list"));
+    updateHistoryControls();
+  }
+  startProjectStream(p.id);
 }
-async function hydrateAssets() {
+async function hydrateAssets(project = state.project) {
   const ids = [
     ...new Set(
-      state.project.scenes
-        .flatMap((s) => [s.image_id, s.audio_id])
-        .filter(Boolean),
+      project.scenes.flatMap((s) => [s.image_id, s.audio_id]).filter(Boolean),
     ),
   ];
   await Promise.all(
@@ -1131,7 +1676,7 @@ async function mediaDialog(scene, kind) {
           },
         });
         close();
-        await navigate("jobs");
+        await announceSubmission();
       } catch (e) {
         error.textContent = e.message;
       } finally {
@@ -1152,7 +1697,7 @@ async function mediaDialog(scene, kind) {
     el(
       "p",
       { class: "note" },
-      "本次会调用外部服务，可能产生费用。结果先保存到素材库，不自动覆盖当前页面。",
+      "本次会调用外部服务，可能产生费用。结果会安全应用到对应页面；分镜内容或目标素材被修改时只保留结果，不覆盖新稿。",
     ),
     error,
     el("div", { class: "actions" }, button("取消", close), submit),
@@ -1162,18 +1707,166 @@ async function mediaDialog(scene, kind) {
   dialog.showModal();
 }
 
-let lastJobs = "";
-async function loadJobs(force = true) {
-  const items = await api("/jobs");
-  const signature = JSON.stringify(items);
-  if (!force && signature === lastJobs) return;
-  lastJobs = signature;
-  const list = el("div");
+function mergedProjectJobs() {
+  const session = state.historySession;
+  if (!session) return state.liveJobs;
+  return [...session.jobs.values()].sort(
+    (a, b) => b.created - a.created || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+  );
+}
+function updateHistoryControls() {
+  const session = state.historySession;
+  if (!session) return;
+  const more = $(".history-more");
+  if (more) {
+    more.disabled = session.loading || session.cursor === null;
+    more.hidden = session.cursor === null;
+    more.textContent = session.loading
+      ? "正在加载…"
+      : session.cursor === null
+        ? "已加载全部历史"
+        : "加载更早任务";
+  }
+  const status = $("#task-history-status");
+  if (status)
+    status.textContent =
+      "已加载 " +
+      session.jobs.size +
+      " 条任务。" +
+      (session.cursor === null ? "已加载全部历史。" : "") +
+      "实时区域仅展示最近日志；完整记录可按任务查看或下载。";
+}
+async function loadOlderProjectJobs() {
+  const session = state.historySession;
+  if (!session || session.loading || session.cursor === null) return;
+  session.loading = true;
+  updateHistoryControls();
+  try {
+    const before = session.cursor
+      ? "&before=" + encodeURIComponent(session.cursor)
+      : "";
+    const page = await api(
+      "/projects/" + session.pid + "/job-history?limit=50" + before,
+    );
+    if (
+      state.historySession !== session ||
+      state.project?.id !== session.pid ||
+      state.tab !== "editor"
+    )
+      return;
+    for (const job of page.items) {
+      const current = session.jobs.get(job.id);
+      if (!current || job.updated > current.updated)
+        session.jobs.set(job.id, job);
+    }
+    session.cursor = page.next_cursor;
+    renderJobs(mergedProjectJobs(), $("#project-job-list"));
+  } finally {
+    session.loading = false;
+    if (state.historySession === session) updateHistoryControls();
+  }
+}
+function formatJobEvents(events) {
+  return events
+    .map(
+      (e) => new Date(e.created * 1000).toLocaleTimeString() + " " + e.message,
+    )
+    .join("\n");
+}
+async function showJobLogPage(jid, card) {
+  let panel = card.querySelector(".manual-log-panel");
+  if (panel) {
+    panel.hidden = !panel.hidden;
+    return;
+  }
+  const log = el("pre", {
+    class: "manual-log",
+    "aria-label": "任务完整日志（分页）",
+  });
+  const status = el("p", { class: "note", "aria-live": "polite" });
+  let after = 0;
+  let count = 0;
+  const more = button("加载后续日志", async () => {
+    try {
+      const events = await api("/jobs/" + jid + "/events?after=" + after);
+      const top = log.scrollTop;
+      if (events.length) {
+        log.append(
+          document.createTextNode(
+            (count ? "\n" : "") + formatJobEvents(events),
+          ),
+        );
+        after = events[events.length - 1].id;
+        count += events.length;
+      }
+      log.scrollTop = top;
+      status.textContent =
+        "已读取 " +
+        count +
+        " 条日志。" +
+        (events.length === 200
+          ? "还有后续日志可继续加载。"
+          : "已到当前末尾；运行中任务可稍后刷新。 ");
+      more.textContent =
+        events.length === 200 ? "加载后续日志" : "刷新后续日志";
+    } catch (error) {
+      status.textContent =
+        "日志读取失败：" + error.message + "；可重试，不会重新执行任务。";
+    }
+  });
+  panel = el(
+    "section",
+    { class: "manual-log-panel" },
+    el(
+      "p",
+      { class: "note" },
+      "按时间正序，每次读取最多200条。下载包含请求开始时的全部日志（UTC时间）。",
+    ),
+    log,
+    status,
+    more,
+  );
+  card.append(panel);
+  more.click();
+}
+function renderJobs(items, target) {
+  let list = target.querySelector(".job-list");
+  if (!list) {
+    list = el("div", { class: "job-list" });
+    target.replaceChildren(
+      el(
+        "p",
+        { class: "note" },
+        "任务由独立 Worker 执行，关闭网页不会停止。失败或中断不会自动重试外部付费请求。",
+      ),
+      list,
+    );
+  }
+  const existing = new Map(
+    [...list.children].map((node) => [node.dataset.jobId, node]),
+  );
+  const ids = new Set(items.map((job) => job.id));
+  for (const node of [...list.children]) {
+    if (!ids.has(node.dataset.jobId)) node.remove();
+  }
+  let previous = null;
+  function place(card) {
+    const next = previous ? previous.nextSibling : list.firstChild;
+    // Never detach an unchanged player: even re-appending can reset playback.
+    if (next !== card) list.insertBefore(card, next);
+    previous = card;
+  }
   for (const j of items) {
+    const signature = JSON.stringify(j);
+    const old = existing.get(j.id);
+    if (old?.jobSignature === signature) {
+      place(old);
+      continue;
+    }
     const p = j.snapshot.project;
     const card = el(
       "section",
-      { class: "job" },
+      { class: "job", "data-job-id": j.id },
       el(
         "div",
         { class: "job-head" },
@@ -1206,24 +1899,15 @@ async function loadJobs(force = true) {
     const actions = el(
       "div",
       { class: "actions" },
-      button("打开项目", () => openProject(j.project_id)),
-      button("查看日志", async () => {
-        const events = await api("/jobs/" + j.id + "/events");
-        let log = card.querySelector("pre");
-        if (!log) {
-          log = el("pre");
-          card.append(log);
-        }
-        log.textContent =
-          events
-            .map(
-              (e) =>
-                new Date(e.created * 1000).toLocaleTimeString() +
-                " " +
-                e.message,
-            )
-            .join("\n") || "任务等待 Worker 领取";
-      }),
+      button("查看日志", () => showJobLogPage(j.id, card)),
+      el(
+        "a",
+        {
+          href: "/api/jobs/" + j.id + "/logs.txt",
+          download: "job-" + j.id + "-logs.txt",
+        },
+        "下载完整日志",
+      ),
     );
     if (["queued", "running"].includes(j.status))
       actions.append(
@@ -1231,7 +1915,6 @@ async function loadJobs(force = true) {
           j.cancel_requested ? "正在取消…" : "取消任务",
           async () => {
             await api("/jobs/" + j.id + "/cancel", { method: "POST" });
-            await loadJobs();
           },
           "danger",
         ),
@@ -1249,15 +1932,14 @@ async function loadJobs(force = true) {
             method: "POST",
             body: { confirm_cost: true, idempotency_key: crypto.randomUUID() },
           });
-          await loadJobs();
         }),
       );
     if (j.kind === "storyboard" && j.status === "succeeded") {
       actions.append(
         button("查看生成分镜", () => {
-          let view = card.querySelector("pre");
+          let view = card.querySelector(".storyboard-result");
           if (!view) {
-            view = el("pre");
+            view = el("pre", { class: "storyboard-result" });
             card.append(view);
           }
           view.textContent = j.result.scenes
@@ -1267,19 +1949,26 @@ async function loadJobs(force = true) {
             )
             .join("\n\n");
         }),
-        button(
-          "应用到项目",
-          async () => {
-            if (!confirm("将替换该版本的分镜；已被修改的项目会拒绝应用。"))
-              return;
-            await api("/jobs/" + j.id + "/apply", {
-              method: "POST",
-              body: { version: p.version },
-            });
-            await openProject(j.project_id);
-          },
-          "primary",
-        ),
+        j.result?.application
+          ? el("span", { hidden: "" })
+          : button(
+              "应用到项目",
+              async () => {
+                if (!confirm("将替换该版本的分镜；已被修改的项目会拒绝应用。"))
+                  return;
+                if (state.dirty)
+                  throw Error("请先保存或放弃当前编辑，再应用生成结果");
+                await api("/jobs/" + j.id + "/apply", {
+                  method: "POST",
+                  body: { version: p.version },
+                });
+                await openProject(
+                  j.project_id,
+                  j.kind === "storyboard" ? "storyboard" : "media",
+                );
+              },
+              "primary",
+            ),
       );
     }
     if (
@@ -1302,19 +1991,28 @@ async function loadJobs(force = true) {
         ),
       );
       actions.append(
-        button(
-          "应用到本页",
-          async () => {
-            if (!confirm("将替换本页选中的素材并产生新草稿版本，是否继续？"))
-              return;
-            await api("/jobs/" + j.id + "/apply", {
-              method: "POST",
-              body: { version: p.version },
-            });
-            await openProject(j.project_id);
-          },
-          "primary",
-        ),
+        j.result?.application
+          ? el("span", { hidden: "" })
+          : button(
+              "应用到本页",
+              async () => {
+                if (
+                  !confirm("将替换本页选中的素材并产生新草稿版本，是否继续？")
+                )
+                  return;
+                if (state.dirty)
+                  throw Error("请先保存或放弃当前编辑，再应用生成结果");
+                await api("/jobs/" + j.id + "/apply", {
+                  method: "POST",
+                  body: { version: p.version },
+                });
+                await openProject(
+                  j.project_id,
+                  j.kind === "storyboard" ? "storyboard" : "media",
+                );
+              },
+              "primary",
+            ),
       );
       card.append(
         el(
@@ -1324,6 +2022,31 @@ async function loadJobs(force = true) {
         ),
       );
     }
+    if (j.result?.application)
+      card.append(
+        el(
+          "p",
+          {
+            class:
+              j.result.application.status === "applied" ? "note" : "danger",
+          },
+          j.result.application.message,
+        ),
+      );
+    if (j.result?.review)
+      card.append(
+        el(
+          "section",
+          { class: "review-advice" },
+          el("h4", {}, "检查建议 · 非人工审核结论"),
+          el("p", { class: "muted" }, j.result.review.scope),
+          el(
+            "ul",
+            {},
+            j.result.review.suggestions.map((text) => el("li", {}, text)),
+          ),
+        ),
+      );
     card.append(actions);
     if (j.result?.artifacts) {
       const links = el("div", { class: "downloads" });
@@ -1343,19 +2066,43 @@ async function loadJobs(force = true) {
       }
       card.append(links);
     }
-    list.append(card);
+    card.append(
+      el(
+        "pre",
+        { class: "live-log", "aria-label": "任务实时日志" },
+        Object.hasOwn(state.liveEvents, j.id)
+          ? formatJobEvents(state.liveEvents[j.id]) ||
+              "暂无日志，等待 Worker 处理。"
+          : "此任务不在实时日志窗口内，请点击「查看日志」或「下载完整日志」。",
+      ),
+    );
+    card.jobSignature = signature;
+    if (old) {
+      for (const selector of [
+        ".manual-log-panel",
+        ".storyboard-result",
+        ".live-log",
+      ]) {
+        const node = old.querySelector(selector);
+        if (node) {
+          card.querySelector(selector)?.remove();
+          card.append(node);
+        }
+      }
+      old.replaceWith(card);
+    }
+    place(card);
   }
-  $("#content").replaceChildren(
-    el(
-      "p",
-      { class: "note" },
-      "任务由独立 Worker 执行，关闭网页不会停止。失败或中断不会自动重试外部付费请求。",
-    ),
-    items.length
-      ? list
-      : empty("还没有制作任务", "先打开一个项目，确认分镜后提交制作。"),
-  );
+  target.querySelector(":scope > .empty")?.remove();
+  if (!items.length)
+    target.append(
+      empty(
+        "本项目还没有制作记录",
+        "从创作要求生成分镜，或确认分镜后前往导出视频。",
+      ),
+    );
 }
+
 async function loadProviders(edit = null) {
   const items = await api("/providers");
   const form = el("form", { class: "panel provider-form" });
@@ -1861,4 +2608,429 @@ async function loadSystem() {
       ),
     ),
   );
+}
+
+function startProjectStream(pid) {
+  stopProjectStream();
+  state.projectJobSignature = "";
+  const source = new EventSource("/api/projects/" + pid + "/events");
+  state.projectStream = source;
+  source.onopen = () => {
+    if (source === state.projectStream && $("#stream-state"))
+      $("#stream-state").textContent = "● 实时连接";
+  };
+  source.onerror = () => {
+    if (source === state.projectStream && $("#stream-state"))
+      $("#stream-state").textContent = "连接中断，正在重连…";
+  };
+  source.addEventListener("removed", () => {
+    if (source !== state.projectStream) return;
+    stopProjectStream();
+    notice(
+      "此项目已在其他页面移入回收站。未保存内容可通过「项目管理 → 草稿恢复」导出；项目可在列表的回收站恢复。",
+    );
+  });
+  source.addEventListener("snapshot", (event) => {
+    if (
+      source !== state.projectStream ||
+      state.project?.id !== pid ||
+      state.tab !== "editor"
+    )
+      return;
+    const data = JSON.parse(event.data);
+    state.liveJobs = data.jobs;
+    state.liveEvents = data.events;
+    const session = state.historySession;
+    if (session?.pid === pid) {
+      for (const job of data.jobs) {
+        const current = session.jobs.get(job.id);
+        if (
+          !current ||
+          !current.updated ||
+          !job.updated ||
+          job.updated >= current.updated
+        )
+          session.jobs.set(job.id, job);
+      }
+      if (session.cursor === undefined)
+        session.cursor =
+          data.jobs.length === 100 ? data.jobs[data.jobs.length - 1].id : null;
+    }
+    updateHistoryControls();
+    updateTaskDock();
+    syncAutoAppliedProject(pid, data.jobs).catch((e) => notice(e.message));
+    const target = $("#project-job-list");
+    if (!target) return;
+    const combined = mergedProjectJobs();
+    const signature = JSON.stringify(combined);
+    if (signature !== state.projectJobSignature) {
+      renderJobs(combined, target);
+      state.projectJobSignature = signature;
+    }
+    for (const card of target.querySelectorAll("[data-job-id]")) {
+      const log = card.querySelector(".live-log");
+      if (!Object.hasOwn(data.events, card.dataset.jobId)) {
+        if (!log.textContent)
+          log.textContent =
+            "此任务不在实时日志窗口内，请点击「查看日志」或「下载完整日志」。";
+        continue;
+      }
+      const text =
+        (data.events[card.dataset.jobId] || [])
+          .map(
+            (e) =>
+              new Date(e.created * 1000).toLocaleTimeString() +
+              "  " +
+              e.message,
+          )
+          .join("\n") || "暂无日志，等待 Worker 处理。";
+      if (log.textContent !== text) {
+        const atBottom =
+          log.scrollHeight - log.scrollTop - log.clientHeight < 32;
+        log.textContent = text;
+        if (atBottom) log.scrollTop = log.scrollHeight;
+      }
+    }
+  });
+}
+async function showProjectTasks() {
+  setStudioStage("results");
+}
+
+const studioStages = {
+  brief: ["创作要求", "主题、风格与 AI 初稿"],
+  storyboard: ["分镜编排", "逐页打磨口播与画面"],
+  media: ["图片与配音", "选择素材或按页生成"],
+  export: ["导出视频", "确认音轨，提交渲染"],
+  results: ["任务与结果", "实时日志、应用与下载"],
+};
+async function restoreRoute() {
+  const parts = location.hash.replace(/^#\//, "").split("/");
+  if (parts[0] === "project" && parts[1]) {
+    try {
+      await openProject(parts[1], studioStages[parts[2]] ? parts[2] : null);
+    } catch (e) {
+      await navigate("projects");
+      notice(e.message);
+    }
+  } else
+    await navigate(
+      ["projects", "assets", "providers", "runtimes", "system"].includes(
+        parts[0],
+      )
+        ? parts[0]
+        : "projects",
+    );
+}
+window.addEventListener("hashchange", () => {
+  if (
+    state.project &&
+    location.hash.startsWith("#/project/" + state.project.id + "/")
+  ) {
+    const stage = location.hash.split("/")[3];
+    if (studioStages[stage]) setStudioStage(stage);
+  } else safe(restoreRoute)();
+});
+window.addEventListener("beforeunload", (e) => {
+  if (state.dirty) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+function mountStudio(p, scenes, outline, settings, ai, exportGroup) {
+  const content = $("#content");
+  const toolbar = content.querySelector(".editor-toolbar");
+  const tools = toolbar.querySelector(".actions");
+  tools.classList.add("project-tools-menu");
+  const menu = el(
+    "details",
+    { class: "project-menu" },
+    el("summary", {}, "项目管理"),
+    tools,
+  );
+  toolbar.prepend(menu);
+  const results = $("#project-tasks");
+  const switcher = content.querySelector(".scene-switcher");
+  const pane = el("div", { class: "studio-pane" });
+  const stageHead = el(
+    "div",
+    { class: "stage-heading" },
+    el("p", { class: "eyebrow", id: "stage-kicker" }),
+    el("h2", { id: "stage-name" }),
+    el("p", { id: "stage-description", class: "muted" }),
+  );
+  settings.append(
+    button("下一步：编排分镜 →", () => setStudioStage("storyboard"), "wide"),
+  );
+  settings.open = true;
+  ai.open = true;
+  settings.hidden = false;
+  ai.hidden = false;
+  exportGroup.hidden = false;
+  const brief = el(
+    "section",
+    { class: "studio-stage brief-stage", "data-stage": "brief" },
+    settings,
+    ai,
+  );
+  const editing = el(
+    "section",
+    { class: "studio-stage", "data-stage": "editing" },
+    switcher,
+    scenes,
+  );
+  const summary = el(
+    "div",
+    { class: "export-summary" },
+    el("span", { class: "eyebrow" }, "制作清单"),
+    el("h3", {}, p.scenes.length + " 页讲解 · " + (styles[p.style] || p.style)),
+    el(
+      "p",
+      {},
+      "图片 " +
+        p.scenes.filter((s) => s.image_id).length +
+        " / " +
+        p.scenes.length +
+        " 页 · 配音 " +
+        p.scenes.filter((s) => s.audio_id).length +
+        " / " +
+        p.scenes.length +
+        " 页",
+    ),
+    el(
+      "p",
+      { class: "note" },
+      p.confirmed && !state.dirty
+        ? "当前版本已确认，可选择音轨并制作。生成不会自动消耗其他模型额度。"
+        : "请先保存并确认分镜，再提交视频制作。",
+    ),
+    button("返回分镜检查", () => setStudioStage("storyboard")),
+  );
+  const exporting = el(
+    "section",
+    { class: "studio-stage export-stage", "data-stage": "export" },
+    summary,
+    exportGroup,
+  );
+  results.classList.add("studio-stage");
+  results.dataset.stage = "results";
+  const steps = el(
+    "nav",
+    { class: "studio-steps", "aria-label": "项目制作阶段" },
+    ...Object.entries(studioStages).map(([key, [title, hint]], i) =>
+      el(
+        "button",
+        {
+          type: "button",
+          "data-stage-link": key,
+          onclick: () => setStudioStage(key),
+        },
+        el("span", { class: "step-index" }, String(i + 1).padStart(2, "0")),
+        el("span", {}, el("strong", {}, title), el("small", {}, hint)),
+      ),
+    ),
+  );
+  const rail = el(
+    "div",
+    { class: "studio-rail" },
+    button("← 全部项目", () => navigate("projects"), "quiet"),
+    el(
+      "div",
+      { class: "rail-project" },
+      el("span", { class: "eyebrow" }, "当前项目"),
+      el("h3", {}, p.title),
+      el(
+        "small",
+        { class: "muted" },
+        "v" + p.version + " · " + p.scenes.length + " 页分镜",
+      ),
+    ),
+    steps,
+    el(
+      "p",
+      { class: "rail-note" },
+      "生成结果自动应用，检查建议供你审核。版本冲突时保留结果；历史版本可以恢复。",
+    ),
+  );
+  const draftBanner = el(
+    "section",
+    { id: "draft-conflict", class: "draft-conflict", role: "status" },
+    el(
+      "div",
+      {},
+      el("strong", {}, "服务器已有新版本 · 本地草稿已保留"),
+      el("p", {}, "先对比、导出或另存，再决定如何继续编辑。"),
+    ),
+    button("对比与保留草稿", showDraftRecovery),
+  );
+  draftBanner.hidden = state.draftConflict !== p.id;
+  pane.append(
+    toolbar,
+    draftBanner,
+    stageHead,
+    brief,
+    editing,
+    exporting,
+    results,
+  );
+  const dock = el(
+    "div",
+    { class: "studio-dock", id: "studio-dock", "aria-label": "当前任务" },
+    el("span", { class: "dock-indicator", id: "dock-indicator" }),
+    el(
+      "div",
+      { class: "dock-copy" },
+      el("strong", { id: "dock-title" }, "准备好开始创作"),
+      el("small", { id: "dock-message" }, "提交生成后，可在这里跟踪进度。"),
+    ),
+    button("日志与结果", showProjectTasks),
+    button(
+      "取消任务",
+      async () => {
+        const j = state.liveJobs.find((j) =>
+          ["queued", "running"].includes(j.status),
+        );
+        if (j && confirm("取消当前任务？已发送的远端请求可能仍计费。"))
+          await api("/jobs/" + j.id + "/cancel", { method: "POST" });
+      },
+      "danger dock-cancel",
+    ),
+  );
+  content.replaceChildren(
+    el("div", { class: "studio-shell" }, rail, pane),
+    dock,
+  );
+  setStudioStage(state.stage);
+  restoreSceneScroll();
+  updateTaskDock();
+}
+function setStudioStage(stage) {
+  if (!studioStages[stage] || !$(".studio-shell")) return;
+  state.stage = stage;
+  document.body.dataset.stage = stage;
+  history.replaceState(null, "", "#/project/" + state.project.id + "/" + stage);
+  $("#crumb").textContent = "视频项目 / " + studioStages[stage][0];
+  $("#stage-kicker").textContent =
+    "STEP 0" + (Object.keys(studioStages).indexOf(stage) + 1);
+  $("#stage-name").textContent = studioStages[stage][0];
+  $("#stage-description").textContent = studioStages[stage][1];
+  for (const node of document.querySelectorAll(".studio-stage"))
+    node.hidden =
+      node.dataset.stage !== stage &&
+      !(
+        node.dataset.stage === "editing" &&
+        ["storyboard", "media"].includes(stage)
+      );
+  for (const node of document.querySelectorAll("[data-stage-link]"))
+    node.setAttribute(
+      "aria-current",
+      node.dataset.stageLink === stage ? "step" : "false",
+    );
+  $("#stage-name").setAttribute("tabindex", "-1");
+  restoreSceneScroll();
+}
+async function announceSubmission() {
+  notice(
+    "任务已提交。你可以继续查看当前页面，底部任务条会实时更新；完成后点击「日志与结果」审阅。",
+  );
+  $("#dock-title").textContent = "任务已提交";
+  $("#dock-message").textContent = "等待 Worker 领取，正在同步状态…";
+}
+function updateTaskDock() {
+  if (!$("#dock-title")) return;
+  const job =
+    state.liveJobs.find((j) => ["queued", "running"].includes(j.status)) ||
+    state.liveJobs[0];
+  $(".dock-cancel").hidden =
+    !job || !["queued", "running"].includes(job.status);
+  if (!job) return;
+  $("#dock-indicator").dataset.status = job.status;
+  $("#dock-title").textContent =
+    ({
+      storyboard: "AI 分镜",
+      image: "图片生成",
+      speech: "语音合成",
+      render: "视频制作",
+    }[job.kind] || job.kind) +
+    " · " +
+    (labels[job.status] || job.status);
+  const logs = state.liveEvents[job.id] || [];
+  $("#dock-message").textContent =
+    job.error || logs.at(-1)?.message || "等待 Worker 处理";
+}
+
+function syncCurrentRoute() {
+  history.replaceState(
+    null,
+    "",
+    state.tab === "editor" && state.project
+      ? "#/project/" + state.project.id + "/" + state.stage
+      : "#/" + state.tab,
+  );
+}
+
+async function syncAutoAppliedProject(pid, jobs) {
+  const version = Math.max(
+    0,
+    ...jobs
+      .filter((j) => j.result?.application?.status === "applied")
+      .map((j) => j.result.application.version),
+  );
+  if (
+    !state.project ||
+    state.project.id !== pid ||
+    state.project.version >= version ||
+    state.syncingProject
+  )
+    return;
+  if (state.dirty) {
+    markDraftConflict(pid);
+    return;
+  }
+  state.syncingProject = true;
+  const previousVersion = state.project.version;
+  try {
+    const updated = await api("/projects/" + pid);
+    if (
+      state.project?.id !== pid ||
+      state.tab !== "editor" ||
+      state.dirty ||
+      state.project.version !== previousVersion
+    )
+      return;
+    await hydrateAssets(updated);
+    if (
+      state.project?.id !== pid ||
+      state.tab !== "editor" ||
+      state.dirty ||
+      state.project.version !== previousVersion
+    )
+      return;
+    // Commit to the visible editor only after all awaits and conflict checks.
+    state.project = updated;
+    renderEditor();
+    notice(
+      "生成结果已自动应用为 v" +
+        updated.version +
+        "；可在任务与结果中查看检查建议，历史版本可恢复。",
+    );
+  } finally {
+    state.syncingProject = false;
+  }
+}
+
+function restoreSceneScroll() {
+  const outline = $(".scene-outline");
+  if (!outline?.clientWidth) return;
+  outline.scrollLeft = state.sceneScroll;
+  const active = outline.querySelectorAll(".outline-link")[state.activeScene];
+  if (active) {
+    const viewport = outline.getBoundingClientRect();
+    const rect = active.getBoundingClientRect();
+    if (rect.left < viewport.left)
+      outline.scrollLeft -= viewport.left - rect.left;
+    else if (rect.right > viewport.right)
+      outline.scrollLeft += rect.right - viewport.right;
+  }
+  state.sceneScroll = outline.scrollLeft;
 }

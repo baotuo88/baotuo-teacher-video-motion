@@ -4,7 +4,7 @@ import os
 import secrets
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -98,7 +98,7 @@ import time
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from . import auth, providers
-from .models import ProjectInput, ProjectUpdate, RenderRequest, ProviderInput, GenerateRequest
+from .models import ProjectInput, ProjectUpdate, RenderRequest, ProviderInput, GenerateRequest, ProductionSettings
 from .store import Store, Conflict, Missing
 
 DATA = Path(os.environ.get('DATA_ROOT', '.data')).resolve()
@@ -182,7 +182,7 @@ def logout(response: Response):
 
 @app.get('/static/{name}')
 def static(name: str):
-    if name not in ('app.js', 'style.css'):
+    if name not in ('app.js', 'style.css', 'studio.css'):
         raise HTTPException(404)
     return FileResponse(WEB / name)
 
@@ -207,8 +207,84 @@ def edit_project(pid: str, body: ProjectUpdate):
     return store().edit(pid, body.version, body.model_dump(exclude={'version'}))
 
 
+@app.get('/api/projects/{pid}/production-settings', dependencies=[Depends(admin)])
+def production_settings(pid: str):
+    return store().production_settings(pid)
+
+
+@app.put('/api/projects/{pid}/production-settings', dependencies=[Depends(admin)])
+def save_production_settings(pid: str, body: ProductionSettings):
+    return store().save_production_settings(pid, body.model_dump())
+
+
 class Version(BaseModel):
     version: int = Field(ge=1)
+
+
+@app.get('/api/project-trash', dependencies=[Depends(admin)])
+def project_trash():
+    return store().trashed_projects()
+
+
+@app.post('/api/project-trash/{pid}/restore', dependencies=[Depends(admin)])
+def restore_trashed_project(pid: str, body: Version):
+    return store().restore_trashed_project(pid, body.version)
+
+
+class DeleteProject(Version):
+    confirm: bool
+
+
+@app.delete('/api/projects/{pid}', dependencies=[Depends(admin)])
+def delete_project(pid: str, body: DeleteProject):
+    if not body.confirm:
+        raise HTTPException(400, '请明确确认移入回收站；编辑历史、任务成片和共享素材将保留')
+    return store().delete_project(pid, body.version)
+
+
+@app.get('/api/projects/{pid}/jobs', dependencies=[Depends(admin)])
+def project_jobs(pid: str):
+    db = store()
+    db.project(pid)
+    return db.project_jobs(pid)
+
+
+@app.get('/api/projects/{pid}/job-history', dependencies=[Depends(admin)])
+def project_job_history(pid: str, before: str | None = Query(default=None, max_length=64), limit: int = Query(default=50, ge=1, le=100)):
+    return store().project_job_history(pid, before, limit)
+
+
+@app.get('/api/projects/{pid}/events', dependencies=[Depends(admin)])
+async def project_events(pid: str, request: Request):
+    import asyncio
+    from starlette.responses import StreamingResponse
+    db = await run_in_threadpool(store)
+    await run_in_threadpool(db.project, pid)
+
+    def snapshot():
+        db.project(pid)
+        items = db.project_jobs(pid)
+        return {'jobs': items, 'events': {j['id']: db.recent_events(j['id']) for j in items[:20]}}
+
+    async def stream():
+        previous = None
+        # Reconnect periodically to revalidate the HttpOnly session and project.
+        for _ in range(50):
+            if await request.is_disconnected():
+                break
+            try:
+                data = json.dumps(await run_in_threadpool(snapshot), ensure_ascii=False)
+            except Missing:
+                yield 'event: removed\ndata: {}\n\n'
+                break
+            if data != previous:
+                yield 'event: snapshot\ndata: ' + data + '\n\n'
+                previous = data
+            else:
+                yield ': heartbeat\n\n'
+            await asyncio.sleep(1)
+    return StreamingResponse(stream(), media_type='text/event-stream',
+                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.post('/api/projects/{pid}/confirm', dependencies=[Depends(admin)])
@@ -245,9 +321,21 @@ def job(jid: str):
 
 
 @app.get('/api/jobs/{jid}/events', dependencies=[Depends(admin)])
-def events(jid: str, after: int = 0):
+def events(jid: str, after: int = Query(default=0, ge=0)):
     store().job(jid)
     return store().events(jid, after)
+
+
+@app.get('/api/jobs/{jid}/logs.txt', dependencies=[Depends(admin)])
+def download_logs(jid: str):
+    from starlette.responses import StreamingResponse
+    db = store()
+    item = db.job(jid)
+    cutoff = db.event_cutoff(jid)
+    return StreamingResponse(db.export_events(jid, cutoff), media_type='text/plain', headers={
+        'Content-Disposition': f'attachment; filename="job-{item["id"]}-logs.txt"',
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+    })
 
 
 @app.post('/api/jobs/{jid}/cancel', dependencies=[Depends(admin)])
@@ -293,7 +381,7 @@ def storyboard(pid: str, body: GenerateRequest):
     if not config['enabled'] or config.get('capability', 'storyboard') != 'storyboard':
         raise HTTPException(409, '请选择已启用的文本分镜配置')
     return db.enqueue(pid, body.version, 'storyboard',
-                      {'provider_id': body.provider_id, 'provider_version': row['updated']},
+                      {'provider_id': body.provider_id, 'provider_version': row['updated'], 'auto_apply': True},
                       active_runtime(), body.idempotency_key)
 
 
@@ -301,6 +389,8 @@ def storyboard(pid: str, body: GenerateRequest):
 def apply_storyboard(jid: str, body: Version):
     db = store()
     item = db.job(jid)
+    if (item.get('result') or {}).get('application', {}).get('status') == 'applied':
+        raise HTTPException(409, '该结果已自动应用，无需再次应用')
     if item['kind'] in ('image', 'speech'):
         return apply_media_result(db, item, body.version)
     if item['kind'] != 'storyboard' or item['status'] != 'succeeded':
@@ -447,7 +537,7 @@ def generate_media(pid: str, body: MediaGenerateRequest):
                   '。本页：' + scene['title'] + '。要点：' + '；'.join(scene['points']) +
                   '。口播：' + scene['narration'] + '。风格：' + project['style'])
     return db.enqueue(pid, body.version, kind, {'provider_id': body.provider_id,
-        'provider_version': row['updated'], 'scene_index': body.scene_index, 'prompt': prompt},
+        'provider_version': row['updated'], 'scene_index': body.scene_index, 'prompt': prompt, 'auto_apply': True},
         active_runtime(), body.idempotency_key)
 
 

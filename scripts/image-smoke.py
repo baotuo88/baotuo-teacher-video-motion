@@ -27,13 +27,13 @@ headers = {'Authorization': 'Basic ' + base64.b64encode(('admin:' + password).en
 base = ''
 
 
-def request(path, payload=None, authenticated=True):
+def request(path, payload=None, authenticated=True, method=None):
     h = dict(headers) if authenticated else {}
     data = None
     if payload is not None:
         data = json.dumps(payload).encode()
         h['Content-Type'] = 'application/json'
-    with urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=h), timeout=10) as response:
+    with urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=h, method=method), timeout=10) as response:
         return json.load(response)
 
 
@@ -67,6 +67,21 @@ try:
     base = 'http://127.0.0.1:' + docker('port', api_name, '8000/tcp').split(':')[-1]
     wait_health()
     assert request('/api/projects/' + project['id'])['title'] == 'CI smoke project'
+    # v4 product lifecycle: preferences and trash survive container restarts.
+    settings_url = '/api/projects/' + project['id'] + '/production-settings'
+    settings = request(settings_url)
+    settings = request(settings_url, {**settings, 'audio': 'edge'}, method='PUT')
+    request('/api/projects/' + project['id'], {'version': 1, 'confirm': True}, method='DELETE')
+    assert any(item['id'] == project['id'] for item in request('/api/project-trash'))
+    docker('restart', api_name)
+    base = 'http://127.0.0.1:' + docker('port', api_name, '8000/tcp').split(':')[-1]
+    wait_health()
+    assert request('/api/projects') == []
+    restored = request('/api/project-trash/' + project['id'] + '/restore', {'version': 1})
+    assert restored['version'] == 2
+    assert request(settings_url)['audio'] == 'edge'
+    assert len(request('/api/projects/' + project['id'] + '/revisions')) == 2
+    assert request('/api/projects/' + project['id'] + '/job-history')['items'] == []
     assert docker('exec', api_name, 'id', '-u') != '0'
     for command in [('node', '--version'), ('npm', '--version'), ('ffmpeg', '-version'),
                     ('ffprobe', '-version'), ('chromium', '--version')]:
@@ -96,7 +111,7 @@ print(j['id'])
     assert docker('inspect', '-f', '{{.State.Running}}', worker_name) == 'true'
     docker('exec', api_name, 'python', '-c',
            "from pathlib import Path; assert not Path('/app/.env').exists(); assert not Path('/app/.data').exists()")
-    print('Image smoke passed: API, auth, persistence, non-root, worker, Node/Chromium/FFmpeg.')
+    print('Image smoke passed: API, auth, persistence, trash/restore, settings, non-root, worker, Node/Chromium/FFmpeg.')
 finally:
     for name in (worker_name, api_name):
         subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

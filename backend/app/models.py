@@ -69,3 +69,10 @@ class ModelDiscoveryInput(StrictModel):
 class MediaGenerateRequest(GenerateRequest):
     scene_index: int = Field(ge=0, le=29)
     prompt: str = Field(default='', max_length=4000)
+
+
+class ProductionSettings(StrictModel):
+    version: int = Field(default=0, ge=0)
+    audio: Literal['silent', 'edge', 'uploaded'] = 'silent'
+    voice: Literal['zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural', 'en-US-JennyNeural'] = 'zh-CN-XiaoxiaoNeural'
+    provider: str = Field(default='', max_length=32, pattern=r'^(|[a-f0-9]{32})$')

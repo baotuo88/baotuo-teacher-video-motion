@@ -164,3 +164,27 @@ def test_probe_detects_wrong_but_valid_encryption_key(tmp_path, monkeypatch):
     assert readiness(db, tmp_path / 'runtimes')['checks']['encryption_key'] is False
     monkeypatch.setenv('PROVIDER_ENCRYPTION_KEY', original.decode())
     assert readiness(db, tmp_path / 'runtimes')['checks']['encryption_key'] is True
+
+
+def test_v4_backup_restores_trash_preferences_and_task_history(tmp_path):
+    from app.models import ProjectInput, ProductionSettings
+    source, archive, target = (tmp_path / name for name in ('source', 'backup', 'restored'))
+    db = Store(source)
+    p = db.create(ProjectInput(title='备份恢复').model_dump())
+    db.save_production_settings(p['id'], ProductionSettings(audio='edge').model_dump())
+    job = db.enqueue(p['id'], 1, 'storyboard', {}, None, 'backup-job')
+    db.finish(job['id'], 'failed', error='fixture')
+    db.event(job['id'], '备份前日志')
+    db.delete_project(p['id'], 1)
+    backup(source, archive)
+    restore(archive, target)
+    recovered = Store(target)
+    assert recovered.projects() == []
+    assert recovered.trashed_projects()[0]['id'] == p['id']
+    restored = recovered.restore_trashed_project(p['id'], 1)
+    assert restored['version'] == 2
+    assert recovered.production_settings(p['id'])['audio'] == 'edge'
+    assert len(recovered.revisions(p['id'])) == 2
+    assert recovered.project_job_history(p['id'])['items'][0]['id'] == job['id']
+    assert recovered.events(job['id'])[0]['message'] == '备份前日志'
+    assert db.trashed_projects()[0]['id'] == p['id']  # original unchanged

@@ -7,6 +7,7 @@ services:
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set a strong ADMIN_PASSWORD in .env}
       PROVIDER_ENCRYPTION_KEY: ${PROVIDER_ENCRYPTION_KEY:?Set a Fernet key in .env}
+      PROVIDER_HTTP_PROXY: ${PROVIDER_HTTP_PROXY:-}
       DATA_ROOT: /data
       MIN_FREE_DISK_MB: ${MIN_FREE_DISK_MB:-1024}
       MAX_PENDING_JOBS: ${MAX_PENDING_JOBS:-20}
@@ -32,6 +33,7 @@ services:
     image: ${IMAGE:?Set IMAGE to the published GHCR tag or digest}
     command: [python, -m, app.worker]
     environment:
+      PROVIDER_HTTP_PROXY: ${PROVIDER_HTTP_PROXY:-}
       DATA_ROOT: /data
       MIN_FREE_DISK_MB: ${MIN_FREE_DISK_MB:-1024}
       MAX_PENDING_JOBS: ${MAX_PENDING_JOBS:-20}

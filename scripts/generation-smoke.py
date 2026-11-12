@@ -52,7 +52,8 @@ text_response = {'choices':[{'message':{'content':json.dumps({'scenes':[{'title'
 with patch.object(providers,'post_json',return_value=text_response):
     execute(store,store.claim(),runtimes)
 assert store.job(text_job['id'])['status']=='succeeded'
-project=post('/api/jobs/'+text_job['id']+'/apply',{'version':1})
+project=store.project(project['id'])
+assert store.job(text_job['id'])['result']['application']['status']=='applied'
 
 image=Image.new('RGB',(900,600),'#edf5f0');draw=ImageDraw.Draw(image)
 for i in range(3):
@@ -67,8 +68,9 @@ with wave.open(out,'wb') as f:
     f.writeframes(b''.join(struct.pack('<h',int(1200*math.sin(2*math.pi*440*n/24000))) for n in range(72000)))
 audio=out.getvalue()
 
+project=post('/api/projects/'+project['id']+'/confirm',{'version':project['version']})
 for kind in ('image','speech'):
-    project=post('/api/projects/'+project['id']+'/confirm',{'version':project['version']})
+    assert project['confirmed'], 'Media auto-apply must preserve confirmation'
     job=post('/api/projects/'+project['id']+'/generate-media',{'version':project['version'],
         'provider_id':configs[kind]['id'],'scene_index':0,'prompt':'A simple diagram',
         'confirm_cost':True,'idempotency_key':uuid.uuid4().hex})
@@ -77,7 +79,9 @@ for kind in ('image','speech'):
         execute(store,store.claim(),runtimes)
     finished=store.job(job['id'])
     assert finished['status']=='succeeded', finished['error']
-    project=post('/api/jobs/'+job['id']+'/apply',{'version':project['version']})
+    project=store.project(project['id'])
+    assert finished['result']['application']['status']=='applied'
+    assert project['confirmed']
 
 project=post('/api/projects/'+project['id']+'/confirm',{'version':project['version']})
 job=post('/api/projects/'+project['id']+'/render',{'version':project['version'],'audio':'uploaded',

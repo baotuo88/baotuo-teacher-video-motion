@@ -38,6 +38,7 @@ def fetch_bytes(base_url, key=None, *, suffix='', payload=None, download=False):
         providers.validate_key(key)
     addresses = providers.public_addresses(parsed.hostname)
     connection = providers.PinnedHTTPS(parsed.hostname, addresses[0], timeout=90)
+    connection.fallback_addresses = addresses[1:]
     limit = MAX_JSON if suffix == '/images/generations' else MAX_MEDIA
     started = False
     try:

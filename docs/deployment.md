@@ -131,3 +131,54 @@ Docker 可用同一 `dc run` 方式额外挂载一个空目标目录到 `/restor
 - 所有运行时必须保存在备份的数据根目录内。工具会将内部绝对符号链接转为相对链接，以支持换目录恢复；拒绝指向数据根目录外的链接。
 - 可复现的本地恢复演练：先执行 `python scripts/generation-smoke.py`，再执行 `python scripts/recovery-smoke.py`。
   该演练只操作隔离副本，不停止、修改或备份当前在线服务。
+
+### 可选的供应商出站代理
+
+默认直连；如果部署主机无法稳定访问供应商，可由管理员设置 `PROVIDER_HTTP_PROXY=http://主机:端口`。
+仅支持无认证 HTTP CONNECT 代理，不读取系统/浏览器代理，不允许 Web 用户配置代理。
+连接使用已验证的公网目标 IP 建立隧道，并按原始供应商域名验证 TLS 证书；不会关闭证书校验或自动重放生成请求。
+代理是管理员信任的网络基础设施，应只使用自己的代理。Docker 中 `127.0.0.1` 是容器自身，不能照搬本机代理地址。
+连接失败发生在生成 HTTP 请求发出之前时显示 GEN_CONNECT；发送之后的超时/中断仍显示结果待确认。
+
+### 项目制作配置迁移（数据库 v3）
+
+- 本次代码首次启动会将 SQLite 升级为 v3，增加独立的项目制作设置表与任务/日志索引；旧项目默认静音，音色默认晓晓。
+- 音轨、Edge 音色和文本模型服务选择按项目保存，不改变分镜版本；设置并发修改返回冲突，不盲目覆盖。
+- 升级前应确认无运行/排队任务，停止 API 和 Worker，备份完整数据卷；两者必须使用相同版本再启动，不能混跑旧 Worker。
+- v2 程序无法读取 v3 数据库。若回滚旧镜像，需恢复升级前的完整备份到新卷；不要手动修改 `user_version`。
+
+### 项目回收站迁移（数据库 v4）
+
+- 首次启动升级为 v4，增加 `project_trash` 表；移入回收站时保留分镜历史、制作设置、任务与文件，暂停项目编辑和新任务提交。
+- 从「项目列表 → 回收站」恢复会提升项目版本及制作设置版本，以拒绝删除前旧标签页的写入；原项目ID、确认状态与任务归属保留。
+- 此功能只覆盖升级后移入回收站的项目。旧版本已永久删除的项目不会自动找回；请检查升级前备份。
+- 回收站暂不提供彻底删除，也不会释放素材/成片占用空间。它不是独立备份，仍需定期备份完整数据卷并异地保存。
+- 升级前无活动任务时停止API/Worker并备份；两者同时更新。v3及更早程序不能读取v4数据库，回退旧镜像需恢复升级前完整快照到新卷，不能只修改 `user_version`。
+
+### 浏览器回归发布门禁
+
+- GitHub Actions 新增独立 `browser` job，使用锁定的 Playwright 依赖及 Ubuntu Chromium，运行七组关键浏览器行为回归。
+- 测试使用临时数据目录、随机管理员凭据和仅API进程，不读取本地 `.env`、Skill运行时或生产数据，不启动Worker，不执行付费模型调用。
+- `image` 依赖后端 `test` 和 `browser` 同时通过；原有容器启动/持久化验收与真实视频渲染门禁仍保留。
+- 失败可查看 Actions 的 `browser-regression-evidence` 附件（保留7天）。本地复现见 `scripts/browser-tests/README.md`。
+- 推送代码前本地通过不等同于远端Actions已通过；必须以该提交的Actions结果及镜像digest为准。
+
+### 本地构建网络诊断与临时代理
+
+Docker Hub鉴权超时不等于项目代码构建失败。先分别检查直连与受信任代理的Docker Hub连接；不要关闭TLS验证或随意替换镜像源。
+
+若宿主机已有受信任HTTP代理，可仅为本次构建设置代理（示例端口需按实际修改）：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890 \
+HTTP_PROXY=http://127.0.0.1:7890 \
+NO_PROXY=localhost,127.0.0.1 \
+docker build --progress=plain \
+  --build-arg HTTPS_PROXY=http://host.docker.internal:7890 \
+  --build-arg HTTP_PROXY=http://host.docker.internal:7890 \
+  -t baotuo-teacher-video-motion:local-acceptance .
+```
+
+前两个变量用于宿主机Docker客户端鉴权请求；build-arg用于构建步骤中的包下载。`host.docker.internal`适用于Docker Desktop；Linux环境需单独确认代理地址和容器可达性。不要把代理凭据写入Dockerfile或提交到仓库；不要假设以上参数能替代Docker daemon自身的网络配置。
+
+构建成功后仍须运行 `python3 scripts/image-smoke.py baotuo-teacher-video-motion:local-acceptance`，并执行容器内真实视频渲染验收。本地标签不是GHCR发布标签。

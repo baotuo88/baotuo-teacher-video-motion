@@ -213,3 +213,16 @@ def test_revision_history_is_immutable(db):
     assert rows[1]['document']['title'] == '铅笔的制作'
     restored = db.edit(p['id'], 2, rows[1]['document'])
     assert restored['version'] == 3 and not restored['confirmed']
+
+
+def test_edge_missing_dependency_is_actionable_before_subprocess(tmp_path, monkeypatch):
+    from app.production import ProductionError
+    import importlib.util
+    monkeypatch.setattr(importlib.util, 'find_spec', lambda name: None)
+    class Runner:
+        def check(self): pass
+        def run(self, *args, **kwargs): pytest.fail('must fail before invoking upstream')
+    directory = tmp_path / 'project'
+    directory.mkdir()
+    with pytest.raises(ProductionError, match='edge-tts'):
+        create_audio(document(), {'audio':'edge','voice':'zh-CN-XiaoxiaoNeural'}, directory, tmp_path, Runner())

@@ -37,7 +37,10 @@ def execute(store, job, runtimes):
             raise ValueError('未知任务类型')
         if store.job(job['id'])['cancel_requested']:
             raise Cancelled()
-        store.finish(job['id'], 'succeeded', result=result)
+        if job['kind'] in ('storyboard', 'image', 'speech'):
+            store.complete_generated(job['id'], result)
+        else:
+            store.finish(job['id'], 'succeeded', result=result)
         store.event(job['id'], '任务完成')
     except UnknownOutcome as error:
         store.finish(job['id'], 'unknown_outcome', error=str(error))

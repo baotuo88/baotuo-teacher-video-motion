@@ -152,3 +152,133 @@ def test_paid_chat_timeout_is_unknown_but_discovery_is_not(monkeypatch):
     with pytest.raises(providers.ProviderError) as error:
         providers.request_json({'base_url': 'https://models.example/v1'}, 'secret', '/models', method='GET')
     assert not isinstance(error.value, providers.UnknownOutcome)
+
+
+@pytest.mark.parametrize('failure,code', [
+    (TimeoutError('private-detail'), 'MODEL_TIMEOUT'),
+    (__import__('ssl').SSLCertVerificationError('private-detail'), 'MODEL_TLS_CERT'),
+    (ConnectionRefusedError('private-detail'), 'MODEL_CONNECT'),
+])
+def test_discovery_transport_errors_are_actionable(monkeypatch, failure, code):
+    fake_transport(monkeypatch, {})
+    class Connection:
+        def __init__(self, *args, **kwargs): pass
+        def request(self, *args, **kwargs): raise failure
+        def close(self): pass
+    monkeypatch.setattr(providers, 'PinnedHTTPS', Connection)
+    with pytest.raises(providers.ProviderError) as error:
+        providers.request_json({'base_url':'https://models.example/v1'}, 'secret', '/models', method='GET')
+    assert code in str(error.value)
+    assert 'private-detail' not in str(error.value)
+    assert 'secret' not in str(error.value)
+
+
+@pytest.mark.parametrize('content,code', [
+    (b'<html>private-detail secret</html>', 'MODEL_HTML'),
+    (b'', 'MODEL_EMPTY'),
+    (b'not-json private-detail secret', 'MODEL_JSON'),
+])
+def test_discovery_invalid_content_identifies_cause(monkeypatch, content, code):
+    fake_transport(monkeypatch, content)
+    with pytest.raises(providers.ProviderError) as error:
+        providers.request_json({'base_url':'https://models.example/v1'}, 'secret', '/models', method='GET')
+    assert code in str(error.value)
+    assert 'private-detail' not in str(error.value)
+    assert 'secret' not in str(error.value)
+
+
+def test_pinned_connection_falls_back_before_http_request(monkeypatch):
+    calls = []
+    class Socket:
+        def settimeout(self, timeout): pass
+        def close(self): pass
+    sock = Socket()
+    def connect(address, timeout):
+        calls.append(address)
+        if len(calls) == 1:
+            raise TimeoutError()
+        return sock
+    class TLS:
+        def wrap_socket(self, value, server_hostname):
+            assert value is sock and server_hostname == 'models.example'
+            return value
+    monkeypatch.setattr(providers.socket, 'create_connection', connect)
+    connection = providers.PinnedHTTPS('models.example', '104.21.25.215', timeout=20)
+    connection.fallback_addresses = ['172.67.134.188']
+    connection._context = TLS()
+    connection.connect()
+    assert calls == [('104.21.25.215', 443), ('172.67.134.188', 443)]
+    assert connection.sock is sock
+
+
+@pytest.mark.parametrize('phase,failure,code', [
+    ('send', TimeoutError('private-secret'), 'GEN_TIMEOUT'),
+    ('headers', __import__('http.client', fromlist=['RemoteDisconnected']).RemoteDisconnected('private-secret'), 'GEN_DISCONNECTED'),
+    ('body', __import__('http.client', fromlist=['IncompleteRead']).IncompleteRead(b'private-secret'), 'GEN_INCOMPLETE'),
+])
+def test_paid_request_records_failure_phase_without_replay(monkeypatch, phase, failure, code):
+    fake_transport(monkeypatch, {})
+    calls = []
+    class Connection:
+        def __init__(self, *args, **kwargs): pass
+        def request(self, *args, **kwargs):
+            calls.append('request')
+            if phase == 'send': raise failure
+        def getresponse(self):
+            if phase == 'headers': raise failure
+            return self
+        status = 200
+        def read(self, *args): raise failure
+        def close(self): calls.append('close')
+    monkeypatch.setattr(providers, 'PinnedHTTPS', Connection)
+    with pytest.raises(providers.UnknownOutcome) as error:
+        providers.post_json({'base_url':'https://models.example/v1'}, 'secret', '/chat/completions', {})
+    message = str(error.value)
+    assert code in message and {'send':'发送请求','headers':'等待响应','body':'读取响应'}[phase] in message
+    assert 'private-secret' not in message
+    assert calls == ['request','close']
+
+
+def test_explicit_proxy_tunnels_to_pinned_ip_with_target_tls(monkeypatch):
+    monkeypatch.setenv('PROVIDER_HTTP_PROXY', 'http://127.0.0.1:7890')
+    calls = []
+    class Socket:
+        def settimeout(self, timeout): pass
+        def close(self): pass
+    sock = Socket()
+    class Tunnel:
+        def __init__(self, host, port, timeout):
+            assert (host,port)==('127.0.0.1',7890)
+            self.sock = sock
+        def set_tunnel(self, host, port): calls.append(('tunnel',host,port))
+        def connect(self): calls.append(('connect',))
+        def close(self): pass
+    class TLS:
+        def wrap_socket(self, value, server_hostname):
+            assert value is sock
+            calls.append(('tls',server_hostname))
+            return sock
+    monkeypatch.setattr(providers.http.client, 'HTTPConnection', Tunnel)
+    connection=providers.PinnedHTTPS('models.example','8.8.8.8',timeout=20)
+    connection._context=TLS()
+    connection.connect()
+    assert calls==[('tunnel','8.8.8.8',443),('connect',),('tls','models.example')]
+
+
+@pytest.mark.parametrize('url',['https://127.0.0.1:7890','http://user:pass@127.0.0.1:7890','http://127.0.0.1:7890/path'])
+def test_invalid_explicit_proxy_fails_closed(monkeypatch,url):
+    monkeypatch.setenv('PROVIDER_HTTP_PROXY',url)
+    connection=providers.PinnedHTTPS('models.example','8.8.8.8',timeout=20)
+    with pytest.raises(providers.ProviderError,match='代理'):
+        connection.connect()
+
+
+def test_preconnect_failure_does_not_claim_remote_billing(monkeypatch):
+    monkeypatch.delenv('PROVIDER_HTTP_PROXY', raising=False)
+    monkeypatch.setattr(providers, 'public_addresses', lambda host: ['8.8.8.8'])
+    def unreachable(*args, **kwargs): raise TimeoutError('sensitive')
+    monkeypatch.setattr(providers.socket, 'create_connection', unreachable)
+    with pytest.raises(providers.ProviderError) as error:
+        providers.post_json({'base_url':'https://models.example/v1'}, 'secret', '/chat/completions', {})
+    assert not isinstance(error.value, providers.UnknownOutcome)
+    assert '[GEN_CONNECT]' in str(error.value) and '尚未发送' in str(error.value)

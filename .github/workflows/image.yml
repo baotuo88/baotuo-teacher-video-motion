@@ -53,8 +53,42 @@ jobs:
           docker compose -f compose.registry.yaml config --quiet
           docker compose -f compose.registry.yaml -f compose.production.yaml config --quiet
 
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: scripts/browser-tests/package-lock.json
+      - name: Install isolated browser test dependencies
+        run: |
+          python -m pip install -r backend/requirements-dev.txt
+          npm ci --prefix scripts/browser-tests
+          cd scripts/browser-tests
+          npx playwright install --with-deps chromium
+      - name: Run project workflow browser regressions (no paid APIs)
+        run: python scripts/browser-ci.py
+      - name: Upload isolated regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-regression-evidence
+          path: .data/browser-ci/
+          retention-days: 7
+          if-no-files-found: warn
+
   image:
-    needs: test
+    needs: [test, browser]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

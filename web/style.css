@@ -1163,3 +1163,379 @@ dialog {
     gap: 0;
   }
 }
+
+/* Creator workspace: compact navigation, focused scenes, explicit setup tabs. */
+:root {
+  --bg: #f4f6fa;
+  --ink: #202c40;
+  --muted: #68788b;
+  --line: #e2e7ef;
+  --green: #286a60;
+  --pale: #e9f3f0;
+}
+[hidden] {
+  display: none !important;
+}
+#app > aside {
+  width: 208px;
+  padding-top: 24px;
+}
+#app > main {
+  margin-left: 208px;
+  padding: 28px 32px 64px;
+  max-width: 1800px;
+}
+.logo {
+  padding-left: 20px;
+  padding-right: 12px;
+}
+.logo small {
+  letter-spacing: 1px;
+  font-size: 9px;
+}
+nav {
+  padding: 30px 12px;
+}
+nav button {
+  padding: 11px 14px;
+  margin-bottom: 5px;
+  border-radius: 8px;
+}
+nav button[data-nav="providers"] {
+  margin-top: 24px;
+}
+header {
+  margin-bottom: 24px;
+}
+header h1 {
+  font-size: 25px;
+  letter-spacing: -0.5px;
+}
+header .eyebrow {
+  margin-top: 0;
+}
+button {
+  font-weight: 550;
+}
+.primary {
+  box-shadow: 0 3px 8px #286a6018;
+}
+.workspace-intro {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  margin: 0 0 26px;
+  padding: 24px 28px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(115deg, #fff, #eef5f3);
+}
+.workspace-intro h2 {
+  margin: 4px 0;
+  font-size: 23px;
+  font-family: inherit;
+}
+.workspace-intro p {
+  margin: 5px 0;
+}
+.workspace-stats {
+  display: flex;
+  flex-direction: column;
+  min-width: 95px;
+  padding-left: 28px;
+  border-left: 1px solid #d5e3df;
+}
+.workspace-stats strong {
+  font-size: 32px;
+  line-height: 1.2;
+}
+.workspace-stats span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.project-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.project-tools input {
+  max-width: 400px;
+}
+.project-tools select {
+  width: 160px;
+}
+.project-tools > span {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.card {
+  border-radius: 12px;
+  transition:
+    transform 0.18s,
+    box-shadow 0.18s;
+}
+.card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 25px #22334c0c;
+}
+.thumbnail {
+  min-height: 110px;
+  padding: 22px;
+  background: linear-gradient(130deg, #e9f1ef, #f1f4f9);
+}
+.thumbnail strong {
+  font-family: inherit;
+  font-size: 19px;
+}
+.card-body {
+  padding: 18px 22px;
+}
+.editor-toolbar {
+  top: 8px;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px #24365006;
+}
+.workflow-strip {
+  display: flex;
+  gap: 6px;
+  margin: 18px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.workflow-strip span {
+  padding: 6px 14px;
+  border-radius: 6px;
+}
+.workflow-strip .current {
+  color: var(--green);
+  background: var(--pale);
+  font-weight: 700;
+}
+.scene-switcher {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.scene-switcher > button {
+  white-space: nowrap;
+  font-size: 12px;
+}
+.scene-outline {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  flex-wrap: nowrap;
+}
+.outline-link {
+  flex-shrink: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.outline-link.selected {
+  background: var(--green);
+  color: #fff;
+  border-color: var(--green);
+}
+.editor-grid {
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 22px;
+}
+.scene {
+  padding: 24px;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px #24365004;
+}
+.scene label {
+  margin-top: 14px;
+  font-size: 13px;
+}
+.scene textarea {
+  background: #fcfdff;
+}
+.scene-number {
+  background: var(--pale);
+  color: var(--green);
+  border-radius: 8px;
+}
+.settings-stack {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  gap: 12px;
+  top: 92px;
+}
+.editor-panel-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 4px;
+  background: #f0f3f7;
+  border-radius: 8px;
+}
+.editor-panel-tabs button {
+  padding: 8px 2px;
+  font-size: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.editor-panel-tabs button[aria-pressed="true"] {
+  color: var(--green);
+  background: #fff;
+  box-shadow: 0 2px 5px #2436500c;
+}
+.settings-stack > .settings-group,
+.settings-stack > .export-group {
+  border: 0;
+  padding: 8px 4px;
+  background: none;
+  box-shadow: none;
+}
+.scene-media {
+  gap: 12px;
+}
+.scene-asset {
+  background: #fafbfd;
+  border-style: dashed;
+}
+@media (max-width: 1100px) {
+  #app > aside {
+    width: 184px;
+  }
+  #app > main {
+    margin-left: 184px;
+    padding: 24px;
+  }
+  .editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .editor-side {
+    grid-row: 1;
+  }
+  .settings-stack {
+    position: static;
+    display: block;
+    max-height: none;
+  }
+  .settings-stack label {
+    margin-top: 10px;
+  }
+}
+@media (max-width: 700px) {
+  #app > aside {
+    position: static;
+    width: 100%;
+    padding: 14px 12px 10px;
+  }
+  .logo {
+    padding: 0 4px 10px;
+  }
+  nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    padding: 0;
+    overflow: visible;
+  }
+  nav button {
+    width: 100%;
+    margin: 0 !important;
+    padding: 9px 3px;
+    font-size: 12px;
+    text-align: center;
+  }
+  #app > main {
+    margin: 0;
+    padding: 20px 14px 40px;
+  }
+  header h1 {
+    font-size: 21px;
+  }
+  header {
+    gap: 12px;
+  }
+  header > button {
+    padding: 9px 10px;
+    white-space: nowrap;
+  }
+  .workspace-intro {
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .workspace-intro h2 {
+    font-size: 19px;
+  }
+  .workspace-stats {
+    display: none;
+  }
+  .project-tools {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .project-tools input {
+    max-width: none;
+    flex-basis: 100%;
+  }
+  .project-tools select {
+    width: 150px;
+  }
+  .workflow-strip {
+    gap: 0;
+    justify-content: space-between;
+  }
+  .workflow-strip span {
+    padding: 6px 7px;
+    font-size: 11px;
+  }
+  .scene {
+    padding: 16px;
+  }
+  .scene-switcher {
+    gap: 6px;
+  }
+  .scene-outline > span {
+    display: none;
+  }
+  .scene-media {
+    grid-template-columns: 1fr;
+  }
+  .editor-toolbar {
+    top: 0;
+  }
+}
+.project-tasks {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+  scroll-margin-top: 96px;
+}
+.project-tasks .panel-title {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.project-tasks h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.live-log {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #182c35;
+  color: #d8e9e4;
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 12px;
+}
+.project-tasks .job {
+  min-width: 0;
+}

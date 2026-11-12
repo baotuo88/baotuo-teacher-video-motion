@@ -6,31 +6,45 @@
 
 > **当前为单机自部署候选版本，尚未完成全部上线验收，不是完整多租户生产版。** 已打通浏览器创建项目 → 分镜编辑/确认 → 独立 Worker → 真实 MP4/SRT 导出。保留上游版本管理，不将计划功能写成已完成。
 
+## 最新更新
+
+### 2026-11-12
+
+- 项目内完成分镜、图片与配音、导出和结果查看，支持桌面与手机布局。
+- 生成结果安全应用并提供检查建议，制作配置按项目记忆。
+- 草稿支持对比、导出和另存，历史任务支持分页及完整日志下载。
+- 项目回收站支持恢复历史与成片入口，实时刷新保留播放器和日志阅读状态。
+
+完整历史见 [更新记录](docs/releases/release-notes.md)。**以上为本地待发布功能，旧镜像不包含这些更新。**
+
 ## 最新发布进展
 
-**镜像已发布，GitHub Actions 全部门禁通过。** 发布代码：`73afc6f`（Linux amd64）。
+**此前版本镜像已发布，其 GitHub Actions 门禁通过；当前累计更新尚未发布。** 旧版发布代码：`73afc6f`（Linux amd64）。
 
 - [CI 验收记录](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/42644496842)：测试、镜像构建、启动/持久化检查、真实容器视频渲染、GHCR发布全部成功。
 - 固定镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-73afc6f`，已验证匿名读取。
 - 镜像摘要：`sha256:d71ec268da9567d7bbac71fe26b0bd1852636bc9513c1ac4d2e8972c9d23035c`。
 - 真实供应商与公网服务器 HTTPS 尚未验收；镜像发布不等于已经部署到你的服务器。
 
-## 本轮上线加固
+## 部署基础与验收状态
 
 新增 HTTPS/Caddy 部署覆盖配置、独立 Worker 心跳与容器健康检查、后台“运行状态”面板、
 请求体限制、统一登录/Basic 限速、磁盘/队列准入限制、日志轮转，以及可校验的停机备份/空目录恢复工具。
-CI 增加固定上游版本真实容器渲染门禁；**本地 Docker Hub 网络受限，但 GitHub Actions 的镜像构建和真实容器渲染已通过**。
+CI 保留固定上游版本真实容器渲染门禁，并新增关键浏览器回归。**当前版本已通过本地镜像构建、启动/持久化及真实容器视频渲染验收，尚未发布；不能用旧版 Actions 结果代表本次改动。**
 
 部署、运行时初始化、备份、恢复、升级步骤见 **[单机上线手册](docs/deployment.md)**。
-本地回归 **121 项通过**，已完成隔离数据的换目录恢复演练；详见[上线加固验收记录](docs/verification/2026-11-09-release-hardening.md)。
+本地后端回归 **172 项通过**，七组隔离浏览器回归通过；历史上线加固记录见[验收文档](docs/verification/2026-11-09-release-hardening.md)，新增界面与发布门禁见[浏览器CI验收](docs/verification/2026-11-12-browser-ci.md)，本轮镜像和完整备份恢复结果见[发布前验收](docs/verification/2026-11-12-release-acceptance.md)。
+
+**当前数据库为 v4。** 升级前备份完整数据卷，API 与 Worker 同步升级；旧镜像不能读取 v4 数据，回退需要恢复兼容的升级前备份。
 真实供应商与公网 HTTPS 尚待部署环境验收；未擅自消耗 API 额度。
 
 ## 已实现
 
 - 管理员登录：HttpOnly 会话、CSRF 校验、登录限速；保留 Basic 认证供 CLI 使用。
-- 项目列表、项目复制、分镜新增/编辑/排序/删除；五种风格与三种受控布局。
+- 项目列表、项目复制、分镜新增/编辑/排序/删除；五种风格与三种受控布局。项目内五阶段工作流，任务实时日志和成片入口。
+- 按项目保存制作设置；草稿冲突对比、导出与另存；历史任务分页与完整日志下载；项目回收站/恢复。
 - 乐观锁版本编辑、分镜确认、历史版本查看/恢复；任务保存不可变项目快照。
-- 自定义**兼容聊天协议**的分镜模型：服务地址、模型、加密 Key、启用/禁用。AI 结果先审阅再应用，不自动覆盖。
+- 自定义**兼容聊天协议**的分镜模型：服务地址、模型、加密 Key、启用/禁用。支持文本、图片和语音能力配置、模型列表获取及手动填写；新任务结果安全自动应用，提供本地规则检查建议（不等同于事实或媒体质量审核）。
 - 独立持久化任务队列、幂等提交、阶段日志、实际子进程取消、显式重试；Worker 重启将运行中任务标为 interrupted，不自动重复付费请求。
 - 素材库：静态 PNG/JPEG/WebP 上传、预览、搜索、归档；16-bit PCM WAV 上传和试听。
 - 分镜绑定图片与逐页 WAV：图片搭配要点，配音按真实时长生成时间轴，素材 SHA-256 校验后复制到独立任务目录。
@@ -41,9 +55,9 @@ CI 增加固定上游版本真实容器渲染门禁；**本地 Docker Hub 网络
 
 - 更多供应商专用协议、SVG/GIF 在自定义项目里的安全上传和编辑集成。
 - 完整受控 Skill 编码执行器；目前读取 Skill 文档生成结构化分镜，再由受控模板编译，不执行模型任意代码。
-- 多机、多租户、多 Worker、生产级渲染网络隔离、数据库迁移体系、硬磁盘配额/自动清理、真实部署环境的备份恢复演练。
+- 多机、多租户、多 Worker、生产级渲染网络隔离、数据库迁移回滚工具、硬磁盘配额/自动清理、真实部署环境的备份恢复演练。
 - 上游新增能力自动识别/适配和后台一键下载/验证；当前不会宣称任何上游更新自动兼容。
-- 真实文本/图片/语音供应商与 Edge 服务的线上验收：未提供账号，未消耗付费额度；分镜协议使用 mock 测试。
+- 真实文本/图片/语音供应商与 Edge 服务的线上验收：本轮验收不调用真实付费接口；模拟供应商通过不代表全部真实服务可用。
 
 ## 本地开发
 
@@ -84,9 +98,9 @@ python -m app.cli activate <运行时ID>
 
 ## 模型服务
 
-部署必须配置 `PROVIDER_ENCRYPTION_KEY`（Fernet key；开发脚本会生成）。后台填写完整 API 基地址，例如 `https://your-provider.example/v1`，请求会追加 `/chat/completions`。配置使用常见兼容聊天协议；第三方服务可能不兼容，须逐一验收。
+部署必须配置 `PROVIDER_ENCRYPTION_KEY`（Fernet key；开发脚本会生成）。后台选择文本、图片或语音能力并填写 API 基地址，例如 `https://your-provider.example/v1`。分别使用兼容的聊天、图片生成或语音合成接口；支持获取模型列表，失败时可手动填写。第三方协议仍须逐一验收。
 
-当前仅允许公网 HTTPS 443，不允许本机/私网/带凭据 URL；DNS 解析后绑定公网 IP、保持 TLS 域名校验、不跟随重定向、不继承代理。暂不支持本地 Ollama 等私网服务，也不支持任意请求脚本。保存不触发付费调用；生成前明确确认可能计费。Key 加密保存、不回显、不进入任务快照；子进程环境不继承 Key 或管理员密码。
+当前仅允许公网 HTTPS 443，不允许本机/私网/带凭据 URL；DNS 解析后绑定公网 IP、保持 TLS 域名校验、不跟随重定向、不自动继承系统代理。可由管理员显式设置受信任的 `PROVIDER_HTTP_PROXY`，详见部署手册；Docker Hub 构建代理与模型出站代理是不同配置。暂不支持本地 Ollama 等私网服务，也不支持任意请求脚本。保存不触发付费调用；生成前明确确认可能计费。Key 加密保存、不回显、不进入任务快照；子进程环境不继承 Key 或管理员密码。
 
 ## Docker Compose
 
@@ -101,7 +115,7 @@ cp .env.example .env
 
 提供 API 控制台和独立 Worker，默认只监听宿主机 127.0.0.1:8000，共享持久化卷。容器非 root、cap_drop、no-new-privileges，Worker 默认限制 2 CPU/4GB RAM。并非不可信代码沙箱；Alpha 只编译受控模板，不对外开放任意代码执行。
 
-**首个 GitHub Actions 已构建并发布镜像，容器启动、持久化和 Worker 检查通过。** 容器中的完整视频渲染、Chromium 沙箱和不同 CPU 架构仍需实测。不要把本机渲染成功等同于 Docker 部署成功。
+**旧版镜像通过容器启动、持久化、Worker 与真实视频渲染检查。** 当前累计更新也通过本地容器验收，但尚未发布到GHCR；其他CPU架构及生产环境仍需实测。不要把本机渲染成功等同于新镜像部署成功。
 
 公网部署前配置 HTTPS、`COOKIE_SECURE=1`、可信反向代理和访问控制；当前登录限速为单 API 进程内计数。完整生产审计未完成。
 
@@ -110,6 +124,10 @@ cp .env.example .env
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 node --check web/app.js
+# 隔离浏览器回归：不使用真实项目/Key，不启动Worker
+npm ci --prefix scripts/browser-tests
+(cd scripts/browser-tests && npx playwright install --with-deps chromium)
+python scripts/browser-ci.py
 # 启动 dev.py 后，可显式运行浏览器测试（会创建项目并渲染，不调用付费服务）
 node scripts/browser-smoke.cjs
 # 成片完成后检查界面、移动端和视频分段下载
@@ -131,7 +149,7 @@ node scripts/browser-check.cjs
 
 ## GitHub 自动构建与发布
 
-已提供 [GitHub Actions](.github/workflows/image.yml)：推送 `main` 或 `v*` 标签时先测试，再构建 **linux/amd64** 镜像，通过容器启动/持久化/Worker 检查后发布至 `ghcr.io/baotuo88/baotuo-teacher-video-motion`。PR 仅检查，不发布；自动使用 `GITHUB_TOKEN`，无需提供模型 API Key 或管理员密码。
+已提供 [GitHub Actions](.github/workflows/image.yml)：推送 `main` 或 `v*` 标签时先通过后端与浏览器测试，再构建 **linux/amd64** 镜像，通过容器启动/持久化/Worker 和真实视频渲染检查后发布至 `ghcr.io/baotuo88/baotuo-teacher-video-motion`。PR 仅检查，不发布；自动使用 `GITHUB_TOKEN`，无需提供模型 API Key 或管理员密码。
 
 服务器可直接拉取镜像，无需安装源码或本地构建：
 
@@ -151,7 +169,7 @@ docker compose -f compose.registry.yaml up -d
 - 项目名称：`baotuo-teacher-video-motion`
 - GitHub：https://github.com/baotuo88/baotuo-teacher-video-motion
 - 构建记录：https://github.com/baotuo88/baotuo-teacher-video-motion/actions
-- 镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:latest`（首次工作流成功后可用）
+- 镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:latest`（目前对应已发布旧版；新版本以对应提交的 Actions 验收为准）
 
 
 ## 素材与编辑器（当前开发版本）

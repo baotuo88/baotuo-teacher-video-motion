@@ -1,7 +1,8 @@
 """Encrypted provider configuration and a narrow chat-compatible HTTPS adapter.
 
 Pin DNS resolution to a public address for each request, preserving TLS hostname
-verification. No redirects, proxy inheritance, arbitrary request headers or retries.
+verification. No redirects, implicit proxy inheritance, arbitrary headers or HTTP retries.
+An operator-only HTTP CONNECT proxy can be explicitly configured.
 """
 import http.client
 import ipaddress
@@ -9,6 +10,7 @@ import json
 import os
 import socket
 import ssl
+import time
 import uuid
 from urllib.parse import urlsplit
 
@@ -71,14 +73,65 @@ class PinnedHTTPS(http.client.HTTPSConnection):
     def __init__(self, host, address, timeout=90):
         super().__init__(host, timeout=timeout, context=ssl.create_default_context())
         self.address = address
+        self.established = False
 
     def connect(self):
-        sock = socket.create_connection((self.address, 443), self.timeout)
-        try:
-            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
-        except BaseException:
-            sock.close()
-            raise
+        # Fail over only TCP/TLS setup, before any HTTP bytes or credentials.
+        # All candidates were validated in one DNS snapshot; never resolve again.
+        proxy = os.environ.get('PROVIDER_HTTP_PROXY', '').strip()
+        endpoint = None
+        if proxy:
+            try:
+                endpoint = urlsplit(proxy)
+                valid = (endpoint.scheme == 'http' and endpoint.hostname and endpoint.port
+                         and not endpoint.username and not endpoint.password
+                         and endpoint.path in ('', '/') and not endpoint.query and not endpoint.fragment
+                         and not any(c.isspace() or ord(c) < 32 for c in proxy))
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ProviderError('代理配置无效：PROVIDER_HTTP_PROXY 需要无认证的 http://主机:端口')
+        deadline = time.monotonic() + self.timeout
+        addresses = list(dict.fromkeys([self.address, *getattr(self, 'fallback_addresses', [])]))
+        for index, address in enumerate(addresses):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Connection deadline exceeded')
+            sock = None
+            try:
+                if endpoint:
+                    tunnel = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=min(5, remaining))
+                    # CONNECT uses a validated literal IP, not proxy-side DNS.
+                    tunnel.set_tunnel(address, 443)
+                    try:
+                        tunnel.connect()
+                        sock = tunnel.sock
+                        tunnel.sock = None
+                    finally:
+                        tunnel.close()
+                else:
+                    sock = socket.create_connection((address, 443), min(5, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Connection deadline exceeded')
+                sock.settimeout(min(5, remaining))
+                self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+                self.sock.settimeout(self.timeout)
+                self.established = True
+                return
+            except ssl.SSLCertVerificationError:
+                if sock is not None:
+                    sock.close()
+                raise
+            except OSError:
+                if sock is not None:
+                    sock.close()
+                if index == len(addresses) - 1:
+                    raise
+            except BaseException:
+                if sock is not None:
+                    sock.close()
+                raise
 
 
 def validate_key(key):
@@ -97,14 +150,18 @@ def decrypt_secret(secret):
 def request_json(config, key, suffix, payload=None, *, method='POST'):
     parsed = validate_url(config['base_url'])
     validate_key(key)
-    address = public_addresses(parsed.hostname)[0]
+    addresses = public_addresses(parsed.hostname)
     discovery = method == 'GET'
-    connection = PinnedHTTPS(parsed.hostname, address, timeout=20 if discovery else 90)
+    connection = PinnedHTTPS(parsed.hostname, addresses[0], timeout=20 if discovery else 90)
+    connection.fallback_addresses = addresses[1:]
+    started = time.monotonic()
+    phase = '发送请求'
     try:
         connection.request(method, parsed.path.rstrip('/') + suffix,
                            body=json.dumps(payload).encode() if payload is not None else None,
                            headers={'Content-Type': 'application/json', 'Accept': 'application/json',
                                     'Authorization': 'Bearer ' + key})
+        phase = '等待响应'
         response = connection.getresponse()
         if response.status < 200 or response.status >= 300:
             # Never include remote response body: it may echo credentials.
@@ -121,15 +178,56 @@ def request_json(config, key, suffix, payload=None, *, method='POST'):
             if response.status >= 500:
                 raise UnknownOutcome(f'服务返回 HTTP {response.status}，结果待确认；请核对任务或账单后再重试')
             raise ProviderError(f'服务返回 HTTP {response.status}，未自动重试；请检查额度和服务配置')
+        phase = '读取响应'
         content = response.read(2 * 1024 * 1024 + 1)
         if len(content) > 2 * 1024 * 1024:
             raise ProviderError('服务响应超过大小限制')
+        if discovery:
+            if not content.strip():
+                raise ProviderError('[MODEL_EMPTY] 服务返回空内容；请确认基地址对应 API，而不是网站首页')
+            if content.lstrip().lower().startswith((b'<!doctype html', b'<html')):
+                raise ProviderError('[MODEL_HTML] 服务返回网页而不是模型 JSON；请检查基地址路径（通常含 /v1），或服务的登录/防护页面')
+        phase = '解析响应'
         return json.loads(content)
     except (OSError, ValueError, http.client.HTTPException) as error:
         if isinstance(error, ProviderError):
             raise
-        message = ('模型列表请求超时、网络失败或返回了无效 JSON；可稍后重试或手动填写模型'
-                   if discovery else '调用失败或响应格式无效；远端可能已计费，请确认后再重试')
+        if not discovery and not getattr(connection, 'established', True):
+            raise ProviderError('[GEN_CONNECT] 建立 HTTPS 连接失败（累计 '
+                                f'{time.monotonic() - started:.1f} 秒）；尚未发送生成 HTTP 请求，'
+                                '请检查出站网络或管理员配置的代理') from error
+        if discovery:
+            if isinstance(error, ssl.SSLCertVerificationError):
+                message = '[MODEL_TLS_CERT] HTTPS 证书校验失败；请检查服务证书链及本机 CA，不能通过关闭证书校验解决'
+            elif isinstance(error, ssl.SSLError):
+                message = '[MODEL_TLS] HTTPS 握手失败；请检查服务的 TLS 配置或网络拦截'
+            elif isinstance(error, TimeoutError):
+                message = '[MODEL_TIMEOUT] 连接或读取模型列表超时（20秒）；请检查服务可达性及管理员代理配置（不自动继承浏览器或系统代理）'
+            elif isinstance(error, (ValueError, UnicodeError)):
+                message = '[MODEL_JSON] 服务返回的内容不是有效 JSON；请检查 API 基地址及 /models 接口'
+            elif isinstance(error, http.client.HTTPException):
+                message = '[MODEL_HTTP] 服务连接中断或 HTTP 响应不完整；请检查服务或网络网关'
+            else:
+                message = '[MODEL_CONNECT] 无法建立或维持 HTTPS 连接；请检查服务器出站网络，请检查管理员代理配置（不自动继承系统代理）'
+        else:
+            if isinstance(error, ssl.SSLCertVerificationError):
+                code, reason = 'GEN_TLS_CERT', 'HTTPS 证书校验失败'
+            elif isinstance(error, ssl.SSLError):
+                code, reason = 'GEN_TLS', 'HTTPS 握手或加密连接失败'
+            elif isinstance(error, TimeoutError):
+                code, reason = 'GEN_TIMEOUT', '连接或读写等待超时'
+            elif isinstance(error, http.client.RemoteDisconnected):
+                code, reason = 'GEN_DISCONNECTED', '远端或中间网关关闭连接，未返回完整响应'
+            elif isinstance(error, http.client.IncompleteRead):
+                code, reason = 'GEN_INCOMPLETE', '响应内容未传输完整'
+            elif isinstance(error, http.client.HTTPException):
+                code, reason = 'GEN_HTTP', 'HTTP 响应协议异常'
+            elif isinstance(error, ValueError):
+                code, reason = 'GEN_JSON', '返回内容不是有效 JSON（可能是网页或不兼容的响应格式）'
+            else:
+                code, reason = 'GEN_NETWORK', '网络连接中断或不可达'
+            message = (f'[{code}] {phase}阶段：{reason}（累计 {time.monotonic() - started:.1f} 秒）；'
+                       '未自动重试，远端可能已计费；请核对服务商请求记录和账单后再重试')
         if not discovery and isinstance(error, (OSError, http.client.HTTPException)):
             raise UnknownOutcome(message) from error
         raise ProviderError(message) from error

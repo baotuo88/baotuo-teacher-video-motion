@@ -27,7 +27,7 @@ class Store:
         self.database = root / 'studio.sqlite3'
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 2:
+            if version > 4:
                 raise RuntimeError('数据库版本高于本程序，请勿使用旧镜像覆盖新数据库')
             db.executescript('''
             PRAGMA journal_mode=WAL;
@@ -54,7 +54,17 @@ class Store:
                 sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, metadata TEXT NOT NULL,
                 created REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
             ''')
-            db.execute('PRAGMA user_version=2')
+            db.executescript('''
+            CREATE TABLE IF NOT EXISTS production_settings (
+                project_id TEXT PRIMARY KEY, version INTEGER NOT NULL, config TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS project_trash (
+                id TEXT PRIMARY KEY, version INTEGER NOT NULL, confirmed INTEGER,
+                document TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL,
+                deleted_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS jobs_project_created ON jobs(project_id,created DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS events_job_id ON events(job_id,id);
+            ''')
+            db.execute('PRAGMA user_version=4')
 
     @contextmanager
     def connect(self):
@@ -83,6 +93,119 @@ class Store:
     def project(self, pid):
         with self.connect() as db:
             return self.project_row(db.execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone())
+
+    def delete_project(self, pid, version):
+        # Serialize with enqueue/claim; retain immutable job snapshots and shared assets.
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone()
+            project = self.project_row(row)
+            if project['version'] != version:
+                raise Conflict('项目已变化，请刷新后再删除')
+            if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND status IN ('queued','running')", (pid,)).fetchone():
+                raise Conflict('项目还有排队或运行中的任务，请先取消并等待任务结束')
+            db.execute('INSERT INTO project_trash SELECT *,? FROM projects WHERE id=?', (time.time(), pid))
+            db.execute('DELETE FROM projects WHERE id=?', (pid,))
+        return {'deleted': True, 'recoverable': True}
+
+    def trashed_projects(self):
+        with self.connect() as db:
+            return [{**self.project_row(row), 'deleted_at': row['deleted_at']}
+                    for row in db.execute('SELECT * FROM project_trash ORDER BY deleted_at DESC,id DESC')]
+
+    def restore_trashed_project(self, pid, version):
+        # Moving rows between active/trash tables keeps all existing active-project
+        # guards effective, including edits, enqueue, confirmation and auto-apply.
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM project_trash WHERE id=?', (pid,)).fetchone()
+            if row is None:
+                raise Missing('回收站中没有此项目；可能已恢复')
+            if row['version'] != version:
+                raise Conflict('回收站项目版本已变化，请刷新后重试')
+            if db.execute('SELECT 1 FROM projects WHERE id=?', (pid,)).fetchone():
+                raise Conflict('项目已存在，不能覆盖')
+            next_version = version + 1
+            confirmed = next_version if row['confirmed'] == version else None
+            db.execute('INSERT INTO projects VALUES (?,?,?,?,?,?)',
+                       (pid, next_version, confirmed, row['document'], row['created'], time.time()))
+            db.execute('INSERT INTO revisions VALUES (?,?,?)', (pid, next_version, row['document']))
+            # Invalidate settings writes from pre-deletion tabs, including version=0 defaults.
+            from .models import ProductionSettings
+            settings = db.execute('SELECT * FROM production_settings WHERE project_id=?', (pid,)).fetchone()
+            config = json.loads(settings['config']) if settings else ProductionSettings().model_dump()
+            settings_version = settings['version'] + 1 if settings else 1
+            config['version'] = settings_version
+            db.execute('INSERT INTO production_settings VALUES (?,?,?) ON CONFLICT(project_id) DO UPDATE SET '
+                       'version=excluded.version,config=excluded.config', (pid, settings_version, json.dumps(config)))
+            db.execute('DELETE FROM project_trash WHERE id=?', (pid,))
+        return self.project(pid)
+
+    def project_jobs(self, pid):
+        with self.connect() as db:
+            return [self.job_row(r) for r in db.execute(
+                'SELECT * FROM jobs WHERE project_id=? ORDER BY created DESC,id DESC LIMIT 100', (pid,))]
+
+    def project_job_history(self, pid, before=None, limit=50):
+        with self.connect() as db:
+            self.project_row(db.execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone())
+            params = [pid]
+            cursor = ''
+            if before:
+                row = db.execute('SELECT created,id FROM jobs WHERE project_id=? AND id=?', (pid, before)).fetchone()
+                if row is None:
+                    raise Missing('任务分页位置不存在或不属于当前项目')
+                cursor = ' AND (created<? OR (created=? AND id<?))'
+                params.extend([row['created'], row['created'], row['id']])
+            rows = db.execute('SELECT * FROM jobs WHERE project_id=?' + cursor +
+                              ' ORDER BY created DESC,id DESC LIMIT ?', (*params, limit + 1)).fetchall()
+            items = [self.job_row(row) for row in rows[:limit]]
+            return {'items': items, 'next_cursor': items[-1]['id'] if len(rows) > limit else None}
+
+    def event_cutoff(self, jid):
+        self.job(jid)
+        with self.connect() as db:
+            return db.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE job_id=?', (jid,)).fetchone()[0]
+
+    def export_events(self, jid, cutoff):
+        # Fixed cutoff: running jobs cannot turn a download into an endless stream.
+        # Close each transaction before yielding; do not pin the SQLite WAL during download.
+        from datetime import datetime, timezone
+        after = 0
+        while True:
+            with self.connect() as db:
+                rows = db.execute('SELECT id,created,message FROM events WHERE job_id=? AND id>? AND id<=? ORDER BY id LIMIT 200',
+                                  (jid, after, cutoff)).fetchall()
+            if not rows:
+                return
+            yield ''.join(datetime.fromtimestamp(row['created'], timezone.utc).isoformat() + ' ' + row['message'] + '\n' for row in rows)
+            after = rows[-1]['id']
+
+    def recent_events(self, jid):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(
+                'SELECT * FROM (SELECT * FROM events WHERE job_id=? ORDER BY id DESC LIMIT 200) ORDER BY id', (jid,))]
+
+    def production_settings(self, pid):
+        from .models import ProductionSettings
+        self.project(pid)
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM production_settings WHERE project_id=?', (pid,)).fetchone()
+            return {**json.loads(row['config']), 'version': row['version']} if row else ProductionSettings().model_dump()
+
+    def save_production_settings(self, pid, settings):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.project_row(db.execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone())
+            row = db.execute('SELECT version FROM production_settings WHERE project_id=?', (pid,)).fetchone()
+            current = row['version'] if row else 0
+            if current != settings['version']:
+                raise Conflict('制作设置已在其他页面修改，请重新打开项目后选择')
+            result = {**settings, 'version': current + 1}
+            db.execute('INSERT INTO production_settings VALUES (?,?,?) ON CONFLICT(project_id) DO UPDATE SET '
+                       'version=excluded.version,config=excluded.config',
+                       (pid, current + 1, json.dumps(result)))
+        return result
 
     def create(self, document):
         pid, now = uuid.uuid4().hex, time.time()
@@ -179,6 +302,57 @@ class Store:
         with self.connect() as db:
             db.execute('UPDATE jobs SET status=?, result=?,error=?,updated=? WHERE id=?',
                        (status, json.dumps(result, ensure_ascii=False) if result else None, error, time.time(), jid))
+
+    def complete_generated(self, jid, result):
+        """Commit generated result and version-checked application atomically.
+
+        Old tasks without auto_apply retain their original manual semantics.
+        """
+        from .review import result_document, review_document, media_revision_compatible
+        from .assets import validate_references
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            job = self.job_row(db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone())
+            if job['status'] != 'running':
+                return
+            if job['cancel_requested']:
+                db.execute("UPDATE jobs SET status='cancelled',updated=? WHERE id=?", (time.time(), jid))
+                return
+            document = result_document(job, result)
+            result = {**result, 'review': review_document(document, job['kind'])}
+            if job['snapshot']['options'].get('auto_apply'):
+                row = db.execute('SELECT * FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+                expected = job['snapshot']['project']['version']
+                if row is not None and row['version'] > expected and job['kind'] in ('image', 'speech'):
+                    source = {key: job['snapshot']['project'][key] for key in ('title', 'topic', 'style', 'scenes')}
+                    index = job['snapshot']['options']['scene_index']
+                    field = 'image_id' if job['kind'] == 'image' else 'audio_id'
+                    revisions = db.execute('SELECT version,document FROM revisions WHERE project_id=? AND version>? AND version<=? ORDER BY version',
+                                           (job['project_id'], expected, row['version'])).fetchall()
+                    # Check every intervening revision, not just the final state (ABA protection).
+                    if (len(revisions) == row['version'] - expected
+                            and all(media_revision_compatible(source, json.loads(r['document']), index, field) for r in revisions)):
+                        document = json.loads(row['document'])
+                        document['scenes'][index][field] = result['asset']['id']
+                        expected = row['version']
+                if row is None or row['version'] != expected:
+                    result['application'] = {'status': 'conflict', 'message': '项目已变化，生成结果已保留，未覆盖新版本。'}
+                else:
+                    validate_references(db, document)
+                    encoded = json.dumps(document, ensure_ascii=False)
+                    # Media bindings do not alter the previously confirmed storyboard.
+                    confirmed = expected + 1 if job['kind'] in ('image', 'speech') and row['confirmed'] == expected else None
+                    db.execute('UPDATE projects SET document=?,version=version+1,confirmed=?,updated=? WHERE id=?',
+                               (encoded, confirmed, time.time(), job['project_id']))
+                    db.execute('INSERT INTO revisions VALUES (?,?,?)', (job['project_id'], expected + 1, encoded))
+                    result['application'] = {'status': 'applied', 'version': expected + 1,
+                                             'message': ('媒体已自动应用，保留分镜确认状态；可在历史版本恢复。' if confirmed
+                                                         else '结果已自动应用为新草稿版本；可在历史版本恢复。')}
+            db.execute("UPDATE jobs SET status='succeeded',result=?,error=NULL,updated=? WHERE id=?",
+                       (json.dumps(result, ensure_ascii=False), time.time(), jid))
+            if result.get('application'):
+                db.execute('INSERT INTO events(job_id,created,message) VALUES (?,?,?)',
+                           (jid, time.time(), result['application']['message']))
 
     def cancel(self, jid):
         self.job(jid)

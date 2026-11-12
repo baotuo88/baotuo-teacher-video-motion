@@ -157,7 +157,7 @@ def test_database_migration_preserves_existing_projects(tmp_path):
     assert migrated.project(p['id'])['title'] == 'Asset test'
     assert assets.listing(migrated) == []
     with migrated.connect() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
         db.execute('PRAGMA user_version=999')
     with pytest.raises(RuntimeError, match='数据库版本'):
         Store(tmp_path)

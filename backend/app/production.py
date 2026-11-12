@@ -1,5 +1,6 @@
 """Compile trusted scene layouts and drive a pinned upstream runtime."""
 import json
+import importlib.util
 import os
 import shutil
 import signal
@@ -104,6 +105,8 @@ def compile_project(project: dict, directory: Path):
 
 
 def create_audio(project, options, directory, skill, runner, store=None):
+    if options['audio'] == 'edge' and importlib.util.find_spec('edge_tts') is None:
+        raise ProductionError('本地缺少 edge-tts 依赖；请使用运行 Worker 的 Python 安装 backend/requirements.txt，或改用上传 WAV 配音')
     audio = directory / 'audio'
     audio.mkdir()
     pages = []

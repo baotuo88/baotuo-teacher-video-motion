@@ -159,8 +159,13 @@ def test_generation_api_confirmation_apply_and_stale_version(db,monkeypatch):
     job=db.claim();execute(db,job,db.root)
     endpoint='/api/jobs/'+job['id']+'/apply'
     applied=client.post(endpoint,json={'version':1},auth=auth)
-    assert applied.status_code==200 and applied.json()['scenes'][0]['image_id']
-    assert not applied.json()['confirmed']
+    assert applied.status_code==409  # Already applied by the worker, never apply twice.
+    current=db.project(p['id'])
+    assert current['version']==2 and current['scenes'][0]['image_id']
+    assert current['confirmed']
+    assert db.job(job['id'])['result']['application']['status']=='applied'
+    body.update(version=2, idempotency_key='next-media-api-test-key')
+    assert client.post('/api/projects/'+p['id']+'/generate-media',json=body,auth=auth).status_code==200
     assert client.post(endpoint,json={'version':1},auth=auth).status_code==409
 
 
