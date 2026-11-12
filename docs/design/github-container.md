@@ -2,10 +2,11 @@
 
 ## 已提供的配置
 
-`.github/workflows/image.yml` 包含两个阶段：
+`.github/workflows/image.yml` 包含三个阶段：
 
 1. **test**：Python 3.13 + Node 24；安装依赖、阻止跟踪本地密钥/数据、运行 pytest、前端语法检查、两份 Compose 配置校验。
-2. **image**：Buildx 构建 linux/amd64 镜像；实际启动 API 与 Worker 容器，验证鉴权、项目持久化、非 root 和 Node/Chromium/FFmpeg 工具；通过后发布到 GHCR。
+2. **browser**：隔离API和数据库运行七组浏览器回归，不读取生产凭据，不调用付费接口；失败上传测试证据。
+3. **image**：等待test和browser通过后，Buildx 构建 linux/amd64 镜像；实际启动 API 与 Worker 容器，验证鉴权、项目持久化、非 root 和 Node/Chromium/FFmpeg 工具；再验证固定上游样片与真实视频渲染，通过后发布到 GHCR。
 
 触发规则：
 
@@ -95,7 +96,7 @@ docker compose -f compose.registry.yaml exec console python -m app.cli --root /d
 docker compose -f compose.registry.yaml exec console python -m app.cli --root /data/runtimes activate <运行时ID>
 ```
 
-CI 容器 smoke 不下载上游，也不执行付费 API。检查 Chromium --version 不等同于完整浏览器渲染测试；真实渲染能力必须通过上述 verify 验收。
+基础容器smoke不下载上游；后续独立渲染步骤会下载固定commit并执行样片与项目真实MP4渲染，不调用付费API。服务器首次安装仍需执行上述verify，CI通过不代替目标环境验收。
 
 ## 后续发布与更新
 

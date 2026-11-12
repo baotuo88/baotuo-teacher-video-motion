@@ -111,14 +111,21 @@ const {
         "#project-job-list video",
       )),
   );
-  await page.route("**/api/jobs/review-job/events?*", (r) =>
-    r.fulfill({ json: [{ created: 1, message: "已展开的任务日志" }] }),
-  );
+  await page.route("**/api/jobs/review-job/events?*", async (r) => {
+    // Make delayed log loading deterministic instead of relying on runner speed.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return r.fulfill({
+      json: [{ id: 1, created: 1, message: "已展开的任务日志" }],
+    });
+  });
   await page
     .locator('[data-job-id="review-job"]')
     .getByRole("button", { name: "查看日志" })
     .click();
-  await page.locator(".manual-log").waitFor();
+  await page
+    .locator(".manual-log")
+    .filter({ hasText: "已展开的任务日志" })
+    .waitFor();
   await page.evaluate(() => {
     window.previousLog = document.querySelector(".manual-log");
   });
