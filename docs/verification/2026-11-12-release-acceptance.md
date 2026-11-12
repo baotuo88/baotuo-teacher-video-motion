@@ -37,3 +37,12 @@
 - 首次远端运行：[43221872863](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/43221872863)。后端test通过；browser中前四组通过，production-state日志保留断言失败，image正确跳过，没有发布。
 - 根因：测试只等待空日志节点出现，未等待异步内容到达就断言日志内容。给模拟日志响应固定增加300ms延迟后本地稳定复现同一失败。
 - 修正等待条件为日志内容实际可见，保留节点身份/内容断言与模拟延迟，不跳过或放宽发布门禁。本次修复仅测试/文档，不新增用户功能，因此沿用同日更新条目。
+
+## 最终远端发布结果
+
+- 修复提交 `66c068d` 已推送main；[Actions 43225375605](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/43225375605)状态success。
+- test、browser（Ubuntu受管理Chromium全部七组）、image全部成功；镜像构建、启动/持久化、固定上游与实际视频渲染、GHCR发布各步骤均成功。
+- 固定镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-66c068d`。
+- Registry manifest摘要：`sha256:e52648e1d7bcb592f9a77164ed4d17de73eb4db25f777100c44038f3cb9dfc80`；匿名获取成功并校验响应内容SHA256，latest摘要相同。平台为linux/amd64；额外unknown平台条目为构建证明，不表示支持其他CPU架构。
+- 最终文档更新仅记录发布证据，不引入新用户功能；README保留同日单个最新更新区块，发布说明未重复追加日期。
+- 尚未部署到用户公网服务器，未自动更新Skill，未调用付费供应商。原文中“未推送/未发布”为此前阶段记录，以本段最终结果为准。

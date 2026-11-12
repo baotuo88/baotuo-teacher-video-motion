@@ -15,22 +15,23 @@
 - 草稿支持对比、导出和另存，历史任务支持分页及完整日志下载。
 - 项目回收站支持恢复历史与成片入口，实时刷新保留播放器和日志阅读状态。
 
-完整历史见 [更新记录](docs/releases/release-notes.md)。**以上功能代码已推送，镜像仍待发布验收，旧镜像不包含这些更新。**
+完整历史见 [更新记录](docs/releases/release-notes.md)。**以上功能已随 `sha-66c068d` 镜像发布。**
 
 ## 最新发布进展
 
-**此前版本镜像已发布，其 GitHub Actions 门禁通过；当前累计更新尚未发布。** 旧版发布代码：`73afc6f`（Linux amd64）。
+**新镜像已发布，后端、Ubuntu浏览器、容器持久化与真实视频渲染门禁全部通过。** 发布代码：`66c068d`（Linux amd64）。
 
-- [CI 验收记录](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/42644496842)：测试、镜像构建、启动/持久化检查、真实容器视频渲染、GHCR发布全部成功。
-- 固定镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-73afc6f`，已验证匿名读取。
-- 镜像摘要：`sha256:d71ec268da9567d7bbac71fe26b0bd1852636bc9513c1ac4d2e8972c9d23035c`。
-- 真实供应商与公网服务器 HTTPS 尚未验收；镜像发布不等于已经部署到你的服务器。
+- [CI 验收记录](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/43225375605)：test、browser、image全部成功。
+- 固定镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:sha-66c068d`，已验证匿名读取。
+- 镜像摘要：`sha256:e52648e1d7bcb592f9a77164ed4d17de73eb4db25f777100c44038f3cb9dfc80`，核验时 `latest` 指向同一摘要。
+- [本轮发布与恢复验收](docs/verification/2026-11-12-release-acceptance.md)。生产建议固定标签或摘要，不依赖浮动latest。
+- 真实供应商与公网服务器HTTPS仍需目标环境验收；发布镜像不会自动部署服务器或升级Skill。
 
 ## 部署基础与验收状态
 
 新增 HTTPS/Caddy 部署覆盖配置、独立 Worker 心跳与容器健康检查、后台“运行状态”面板、
 请求体限制、统一登录/Basic 限速、磁盘/队列准入限制、日志轮转，以及可校验的停机备份/空目录恢复工具。
-CI 保留固定上游版本真实容器渲染门禁，并新增关键浏览器回归。**当前版本已通过本地镜像构建、启动/持久化及真实容器视频渲染验收，尚未发布；不能用旧版 Actions 结果代表本次改动。**
+CI 保留固定上游版本真实容器渲染门禁，并新增关键浏览器回归。**当前发布已通过本地验收及对应提交的远端Actions门禁。**
 
 部署、运行时初始化、备份、恢复、升级步骤见 **[单机上线手册](docs/deployment.md)**。
 本地后端回归 **172 项通过**，七组隔离浏览器回归通过；历史上线加固记录见[验收文档](docs/verification/2026-11-09-release-hardening.md)，新增界面与发布门禁见[浏览器CI验收](docs/verification/2026-11-12-browser-ci.md)，本轮镜像和完整备份恢复结果见[发布前验收](docs/verification/2026-11-12-release-acceptance.md)。
@@ -115,7 +116,7 @@ cp .env.example .env
 
 提供 API 控制台和独立 Worker，默认只监听宿主机 127.0.0.1:8000，共享持久化卷。容器非 root、cap_drop、no-new-privileges，Worker 默认限制 2 CPU/4GB RAM。并非不可信代码沙箱；Alpha 只编译受控模板，不对外开放任意代码执行。
 
-**旧版镜像通过容器启动、持久化、Worker 与真实视频渲染检查。** 当前累计更新也通过本地容器验收，但尚未发布到GHCR；其他CPU架构及生产环境仍需实测。不要把本机渲染成功等同于新镜像部署成功。
+**当前发布镜像通过容器启动、持久化、Worker与真实视频渲染检查。** 其他CPU架构及生产环境仍需实测；镜像验收成功不等于已部署服务器。
 
 公网部署前配置 HTTPS、`COOKIE_SECURE=1`、可信反向代理和访问控制；当前登录限速为单 API 进程内计数。完整生产审计未完成。
 
@@ -169,7 +170,7 @@ docker compose -f compose.registry.yaml up -d
 - 项目名称：`baotuo-teacher-video-motion`
 - GitHub：https://github.com/baotuo88/baotuo-teacher-video-motion
 - 构建记录：https://github.com/baotuo88/baotuo-teacher-video-motion/actions
-- 镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:latest`（目前对应已发布旧版；新版本以对应提交的 Actions 验收为准）
+- 镜像：`ghcr.io/baotuo88/baotuo-teacher-video-motion:latest`（当前发布亦提供固定标签 `sha-66c068d`）
 
 
 ## 素材与编辑器（当前开发版本）

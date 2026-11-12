@@ -108,4 +108,4 @@ docker compose -f compose.registry.yaml exec console python -m app.cli --root /d
 
 ## 当前验证边界
 
-工作流和部署配置已写入项目，发布状态请查看仓库 Actions 和 Packages。此前本地 Docker Hub 访问超时，因此不能声称镜像已经构建通过。首次 GitHub 执行日志是后续验收依据。
+提交 `66c068d` 已通过[全部发布门禁](https://github.com/baotuo88/baotuo-teacher-video-motion/actions/runs/43225375605)并发布 `sha-66c068d`，匿名读取核验成功。数据库为v4，升级前停止接收任务、备份完整数据卷并同步更新API/Worker；旧版程序不能直接读取v4。真实供应商、公网HTTPS及生产环境恢复演练仍需部署现场验收。
